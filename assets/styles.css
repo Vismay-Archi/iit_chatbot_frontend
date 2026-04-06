@@ -1,0 +1,470 @@
+/* ═══════════════════════════════════════════════════
+   IIT CHATBOT  —  styles.css
+   Light default  |  [data-theme="dark"] overrides
+═══════════════════════════════════════════════════ */
+
+/* ── Light (default) ────────────────────────────── */
+:root {
+    --red:          #CC0000;
+    --red-dark:     #aa0000;
+    --bg:           #f2f2f5;
+    --bg-card:      #ffffff;
+    --bg-head:      #fafafa;
+    --bg-bot-bub:   #eeeeee;
+    --bg-user-bub:  #CC0000;
+    --bg-chip:      #fff0f0;
+    --bg-topic-act: #fff0f0;
+    --bg-input:     #ffffff;
+    --txt:          #111111;
+    --txt-sub:      #555555;
+    --txt-muted:    #aaaaaa;
+    --txt-chip:     #880000;
+    --txt-topic:    #333333;
+    --txt-topic-act:#CC0000;
+    --txt-bot-bub:  #111111;
+    --txt-user-bub: #ffffff;
+    --border:       #e0e0e0;
+    --border-act:   #CC0000;
+    --shadow-cta:   rgba(204,0,0,0.30);
+}
+
+/* ── Dark overrides ─────────────────────────────── */
+[data-theme="dark"] {
+    --bg:           #13131f;
+    --bg-card:      #1d1d2e;
+    --bg-head:      #17172a;
+    --bg-bot-bub:   #252540;
+    --bg-user-bub:  #CC0000;
+    --bg-chip:      #2a0808;
+    --bg-topic-act: #280808;
+    --bg-input:     #1d1d2e;
+    --txt:          #e8e8f2;
+    --txt-sub:      #aaaacc;
+    --txt-muted:    #666688;
+    --txt-chip:     #ff9090;
+    --txt-topic:    #b0b0cc;
+    --txt-topic-act:#ff7070;
+    --txt-bot-bub:  #e8e8f2;
+    --txt-user-bub: #ffffff;
+    --border:       #2a2a44;
+    --border-act:   #CC0000;
+    --shadow-cta:   rgba(204,0,0,0.45);
+}
+
+/* ── Page background ─────────────────────────────── */
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+.main { background-color: var(--bg) !important; }
+
+/* ── Block container ─────────────────────────────── */
+.block-container {
+    padding-top: 0.6rem !important;
+    padding-bottom: 0.5rem !important;
+    padding-left: 1.2rem !important;
+    padding-right: 1.2rem !important;
+    max-width: 100% !important;
+}
+
+/* ── Column gap ──────────────────────────────────── */
+[data-testid="stHorizontalBlock"] { gap: 6px !important; }
+
+/* ══════════════════════════════════════════════════
+   TOP BAR
+══════════════════════════════════════════════════ */
+.topbar-brand {
+    font-size: 30px !important;
+    font-weight: 800 !important;
+    color: var(--red) !important;
+    margin: 0 !important;
+    padding: 10px 0 6px !important;
+    line-height: 1.0 !important;
+    width: 100% !important;
+    text-align: center !important;
+}
+
+/* Client-side theme toggle button */
+.iit-theme-btn {
+    background-color: var(--red) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.25) !important;
+    border-radius: 999px !important;
+    padding: 6px 16px !important;
+    font-family: 'Segoe UI', system-ui, sans-serif !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    cursor: pointer !important;
+    transition: background 0.15s, transform 0.1s !important;
+    white-space: nowrap !important;
+    line-height: 1.4 !important;
+}
+.iit-theme-btn:hover {
+    background-color: var(--red-dark) !important;
+}
+.iit-theme-btn:active {
+    transform: scale(0.98) !important;
+}
+.topbar-line {
+    height: 3px;
+    background: var(--red);
+    border-radius: 2px;
+    margin-bottom: 14px;
+}
+
+/* ── ALL Streamlit buttons — base reset ───────────── */
+div[data-testid="stButton"] > button {
+    font-family: 'Segoe UI', system-ui, sans-serif !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    border-radius: 20px !important;
+    padding: 5px 16px !important;
+    cursor: pointer !important;
+    transition: background 0.15s, transform 0.1s !important;
+    white-space: nowrap !important;
+    border: none !important;
+    line-height: 1.4 !important;
+}
+
+/* ── Theme / Home / Sidebar toggle buttons ─────────
+   These are: home_theme_btn, chat_theme_btn, home_btn, sidebar_toggle
+   We style ALL buttons in the topbar columns the same pill way.
+   Since :has() is unreliable, we style ALL non-CTA, non-send buttons
+   as pills and override CTA/Send separately below.
+────────────────────────────────────────────────── */
+div[data-testid="stButton"] > button {
+    background-color: var(--red) !important;
+    color: #ffffff !important;
+    border: 1px solid rgba(255,255,255,0.25) !important;
+}
+
+/* Help button: black background with white ? */
+button[key="help_btn"] {
+    background-color: #000000 !important;
+    color: #ffffff !important;
+}
+div[data-testid="stButton"] > button:hover {
+    background-color: var(--red-dark) !important;
+}
+div[data-testid="stButton"] > button:active {
+    transform: scale(0.97) !important;
+}
+
+/* ── CTA button override ────────────────────────── */
+div[data-testid="stButton"]:has(> button[data-testid="cta_btn-label"]) > button,
+button[data-testid="baseButton-secondary"][aria-label="🚀  Let's get started"],
+div[data-testid="stButton"] > button[key="cta_btn"] {
+    border-radius: 28px !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    padding: 12px 32px !important;
+    box-shadow: 0 4px 20px var(--shadow-cta) !important;
+    letter-spacing: 0.02em !important;
+    width: 100% !important;
+}
+
+/* ── Send button (chat panels) ───────────────────── */
+button[key="send_A"],
+button[key="send_B"] {
+    border-radius: 8px !important;
+    font-size: 13px !important;
+    padding: 6px 14px !important;
+    box-shadow: none !important;
+}
+
+/* ── Topic buttons in sidebar ────────────────────── */
+.topic-btn-wrap div[data-testid="stButton"] > button {
+    background-color: transparent !important;
+    color: var(--txt-topic) !important;
+    border: none !important;
+    border-left: 3px solid transparent !important;
+    border-radius: 0 8px 8px 0 !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    box-shadow: none !important;
+    width: 100% !important;
+}
+.topic-btn-wrap div[data-testid="stButton"] > button:hover {
+    background-color: var(--bg-topic-act) !important;
+    color: var(--txt-topic-act) !important;
+}
+.topic-active div[data-testid="stButton"] > button {
+    background-color: var(--bg-topic-act) !important;
+    color: var(--txt-topic-act) !important;
+    border-left: 3px solid var(--red) !important;
+    font-weight: 700 !important;
+}
+
+/* ══════════════════════════════════════════════════
+   HOMEPAGE
+══════════════════════════════════════════════════ */
+.home-wrapper {
+    min-height: calc(100vh - 260px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem 1rem 0rem;
+    text-align: center;
+}
+.home-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    max-width: 520px;
+    width: 100%;
+}
+div[class*="st-key-home_cta_wrap"] {
+    margin-top: -110px;
+}
+.home-chips {
+    margin-bottom: 8px;
+}
+.home-logo-img {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 3px solid var(--red);
+    margin-bottom: 18px;
+}
+.home-logo-fallback {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: var(--red);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+    font-weight: 900;
+    margin-bottom: 18px;
+}
+.home-title {
+    font-size: 2rem !important;
+    font-weight: 800 !important;
+    color: var(--txt) !important;
+    margin: 0 0 10px !important;
+    letter-spacing: -0.01em !important;
+}
+.home-desc {
+    font-size: 14px !important;
+    color: var(--txt-sub) !important;
+    line-height: 1.75 !important;
+    margin-bottom: 18px !important;
+}
+.home-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+    margin-bottom: 24px;
+}
+.chip {
+    background: var(--bg-chip);
+    color: var(--txt-chip) !important;
+    border: 1px solid rgba(204,0,0,0.25);
+    border-radius: 20px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* ══════════════════════════════════════════════════
+   SIDEBAR
+══════════════════════════════════════════════════ */
+.sidebar-wrap {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 8px 16px;
+    min-height: 360px;
+    /* Let Streamlit widgets flow naturally to the top. */
+    display: block !important;
+}
+.sidebar-lbl {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--red) !important;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0 12px 6px;
+    display: block;
+}
+
+.topic-btn-wrap {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Static topics chips (non-clickable) */
+.topic-chip-static {
+    background: var(--bg-chip);
+    color: var(--txt-topic) !important;
+    border-radius: 20px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    margin: 4px 8px;
+    text-align: left;
+}
+
+/* Topic buttons: style reliably using Streamlit button `key` and `kind` */
+button[key^="topic_"] {
+    background-color: transparent !important;
+    color: var(--txt-topic) !important;
+    border: none !important;
+    border-left: 3px solid transparent !important;
+    border-radius: 0 8px 8px 0 !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    padding: 8px 12px !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    box-shadow: none !important;
+    width: 100% !important;
+}
+
+button[key^="topic_"]:hover {
+    background-color: var(--bg-topic-act) !important;
+    color: var(--txt-topic-act) !important;
+}
+
+button[key^="topic_"][kind="primary"] {
+    background-color: var(--bg-topic-act) !important;
+    color: var(--txt-topic-act) !important;
+    border-left: 3px solid var(--red) !important;
+    font-weight: 700 !important;
+}
+
+/* ══════════════════════════════════════════════════
+   CHAT PANELS
+══════════════════════════════════════════════════ */
+.panel-wrap {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+.panel-head {
+    background: var(--bg-head);
+    border-bottom: 1px solid var(--border);
+    padding: 9px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--txt) !important;
+}
+.model-tag {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--txt-muted);
+    margin-left: 6px;
+}
+
+/* ── Messages ─────────────────────────────────────── */
+.msgs-area {
+    padding: 10px 12px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 380px;
+    overflow-y: auto;
+    background: var(--bg-card);
+}
+.msgs-area::-webkit-scrollbar { width: 3px; }
+.msgs-area::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+}
+
+.msg-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+}
+.user-msg-row { flex-direction: row-reverse; }
+
+/* ── Avatars ──────────────────────────────────────── */
+.av-img {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1.5px solid var(--red);
+    flex-shrink: 0;
+}
+.av-fallback {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--red);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8px;
+    font-weight: 900;
+    flex-shrink: 0;
+}
+.av-user {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--red);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8px;
+    font-weight: 800;
+    flex-shrink: 0;
+}
+
+/* ── Bubbles ──────────────────────────────────────── */
+.bubble {
+    max-width: 80%;
+    padding: 7px 12px;
+    font-size: 13px;
+    line-height: 1.55;
+    word-break: break-word;
+}
+.bot-bub {
+    background: var(--bg-bot-bub) !important;
+    color: var(--txt-bot-bub) !important;
+    border-radius: 4px 14px 14px 14px;
+}
+.user-bub {
+    background: var(--bg-user-bub) !important;
+    color: var(--txt-user-bub) !important;
+    border-radius: 14px 4px 14px 14px;
+}
+
+/* ── Input hint ───────────────────────────────────── */
+.inp-hint {
+    font-size: 11px !important;
+    color: var(--txt-muted) !important;
+    margin: 2px 0 0 2px !important;
+    padding: 0 !important;
+    line-height: 1 !important;
+}
+
+/* ── Text input ───────────────────────────────────── */
+div[data-testid="stTextInput"] input {
+    background: var(--bg-input) !important;
+    color: var(--txt) !important;
+    border: 1.5px solid var(--border) !important;
+    border-radius: 8px !important;
+    font-size: 13px !important;
+}
+div[data-testid="stTextInput"] input:focus {
+    border-color: var(--red) !important;
+    box-shadow: 0 0 0 2px rgba(204,0,0,0.12) !important;
+}
+div[data-testid="stTextInput"] input::placeholder {
+    color: var(--txt-muted) !important;
+}
+
