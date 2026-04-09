@@ -247,8 +247,9 @@ if ENABLE_FEEDBACK:
         
         print("ERROR - No message matched message_id")
 
+# ── Change 3: increased timeout from 60 to 120 seconds ────────────────────────
 def call_backend(endpoint: str, payload: dict):
-    r = requests.post(endpoint, json=payload, timeout=60)
+    r = requests.post(endpoint, json=payload, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -276,7 +277,8 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
                 "prompt": user_input,
                 "topic": topic or "",
                 "chat_history": chat_history,
-                "pending_context": None,
+                # ── Change 1: use stored pending_context instead of None ──────
+                "pending_context": st.session_state.get("pending_context_b"),
             }
 
         if not endpoint:
@@ -304,6 +306,12 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
                 or ""
             )
             sources = data.get("source_urls") or data.get("sources") or []
+
+            # ── Change 2: store/clear pending_context_b based on response ────
+            if data.get("is_clarification"):
+                st.session_state["pending_context_b"] = data.get("pending_context")
+            else:
+                st.session_state["pending_context_b"] = None
 
         if isinstance(sources, str):
             sources = [sources]
