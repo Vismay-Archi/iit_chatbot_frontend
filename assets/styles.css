@@ -495,10 +495,38 @@ div[data-testid="stExpander"] div[data-testid="stExpanderDetails"] {
 }
 div[data-testid="stExpander"] p,
 div[data-testid="stExpander"] a {
-    color: #5b9bd5 !important;
+    color: #f2f4f5 !important;
     font-size: 0.82rem !important;
     word-break: break-all !important;
 }
 div[data-testid="stExpander"] a:hover {
     text-decoration: underline !important;
 }
+/* ── Thinking tag ─────────────────────────────────── */
+.thinking-tag {
+    font-size: 11px !important;
+    color: var(--red) !important;
+    font-style: italic !important;
+    margin-left: 8px !important;
+}
+
+/* ── Thinking bubble dots ─────────────────────────── */
+.thinking-bub {
+    display: flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    padding: 10px 14px !important;
+}
+.dot-pulse {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--txt-muted);
+    display: inline-block;
+    animation: pulse 1s infinite ease-in-out;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50%       { opacity: 1;   transform: scale(1.1); }
+}
+
