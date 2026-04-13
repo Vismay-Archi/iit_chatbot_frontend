@@ -468,3 +468,37 @@ div[data-testid="stTextInput"] input::placeholder {
     color: var(--txt-muted) !important;
 }
 
+/* ══════════════════════════════════════════════════
+   SOURCES EXPANDER
+══════════════════════════════════════════════════ */
+div[data-testid="stExpander"] {
+    background-color: #1a1a1a !important;
+    border: none !important;
+    border-radius: 8px !important;
+    margin-top: 4px !important;
+    margin-bottom: 12px !important;
+}
+div[data-testid="stExpander"] summary {
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+}
+div[data-testid="stExpander"] summary:hover {
+    color: #ffffff !important;
+}
+div[data-testid="stExpander"] summary svg {
+    fill: #ffffff !important;
+}
+div[data-testid="stExpander"] div[data-testid="stExpanderDetails"] {
+    background-color: #1a1a1a !important;
+    padding: 4px 16px 12px !important;
+}
+div[data-testid="stExpander"] p,
+div[data-testid="stExpander"] a {
+    color: #5b9bd5 !important;
+    font-size: 0.82rem !important;
+    word-break: break-all !important;
+}
+div[data-testid="stExpander"] a:hover {
+    text-decoration: underline !important;
+}
