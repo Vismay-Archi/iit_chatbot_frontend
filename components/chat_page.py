@@ -359,56 +359,22 @@ SOURCES_CSS = """
 """
 
 def render_sources_panel(sources: list, panel_id: str, message_id: int):
-    """
-    Renders a dark collapsible Sources panel matching Chatbot B's style.
-    Uses st.expander internally but overrides its appearance with injected CSS.
-    """
     if not sources:
         return
 
-    # Inject CSS once per session
-    css_key = f"sources_css_injected"
-    if not st.session_state.get(css_key):
-        st.markdown(SOURCES_CSS, unsafe_allow_html=True)
-        st.session_state[css_key] = True
+    with st.expander("🔗 Sources", expanded=False):
+        for i, src in enumerate(sources, start=1):
+            if isinstance(src, dict):
+                title = src.get("title") or src.get("label") or f"Source {i}"
+                url = src.get("url") or src.get("href") or ""
+            else:
+                title = f"Source {i}"
+                url = str(src).strip()
 
-    # Build source rows HTML
-    rows_html = ""
-    for i, src in enumerate(sources, start=1):
-        if isinstance(src, dict):
-            title = src.get("title") or src.get("label") or f"Source {i}"
-            url = src.get("url") or src.get("href") or ""
-        else:
-            title = f"Source {i}"
-            url = str(src).strip()
-
-        if url:
-            rows_html += f"""
-            <div class="source-item">
-                <div class="source-dot"></div>
-                <a class="source-link" href="{url}" target="_blank">{title}</a>
-            </div>"""
-        else:
-            rows_html += f"""
-            <div class="source-item">
-                <div class="source-dot"></div>
-                <span class="source-link">{title}</span>
-            </div>"""
-
-    panel_html = f"""
-    <div class="sources-panel">
-      <details>
-        <summary class="sources-header">
-          <span class="chevron">▼</span> Sources
-        </summary>
-        <div class="sources-body">
-          {rows_html}
-        </div>
-      </details>
-    </div>
-    """
-    st.markdown(panel_html, unsafe_allow_html=True)
-
+            if url:
+                st.markdown(f"[{title}]({url})")
+            else:
+                st.markdown(f"{title}")
 
 def render_panel(panel_id: str, logo_b64: str):
     msg_key = f"messages_{panel_id.lower()}"
