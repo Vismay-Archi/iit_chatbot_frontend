@@ -1,35 +1,30 @@
-''' CHATBOT MESSAGES ARE STORED HERE '''
 import base64
-import html
 import json
 import os
-from datetime import datetime
+import threading
 from pathlib import Path
 
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
+# ── Constants ─────────────────────────────────────────────────────
 TOPICS = ["Academic Calendar", "Tuition", "Directory", "Policies", "Handbook"]
 
-
-DISLIKE_REASONS = [
-    "Hallucination",
-    "No clarification",
-    "Not helpful",
-    "Wrong answer",
-    "Incomplete answer",
-    "Other",
-]
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-FEEDBACK_FILE = BASE_DIR / "feedback_log.jsonl"
+BASE_DIR         = Path(__file__).resolve().parent.parent
+FEEDBACK_FILE    = BASE_DIR / "feedback_log.jsonl"
 MODEL_A_ENDPOINT = os.getenv("MODEL_A_ENDPOINT", "").strip()
 MODEL_B_ENDPOINT = os.getenv("MODEL_B_ENDPOINT", "").strip()
+ENABLE_FEEDBACK  = False
 
-ENABLE_FEEDBACK = False
+DISLIKE_REASONS = [
+    "Hallucination", "No clarification", "Not helpful",
+    "Wrong answer", "Incomplete answer", "Other",
+]
 
+# ── Stub fallbacks ────────────────────────────────────────────────
 STUBS_A = {
     "Academic Calendar": [
         "Spring 2025 classes begin January 13th and end May 2nd.",
@@ -46,7 +41,7 @@ STUBS_A = {
     "Directory": [
         "You can search the IIT directory at web.iit.edu/directory.",
         "Faculty and staff contacts are listed by department on the IIT website.",
-        "The Registrar's office can be reached at [registrar@iit.edu](mailto:registrar@iit.edu).",
+        "The Registrar's office can be reached at registrar@iit.edu.",
         "For IT support, contact the Help Desk at 312-567-3375.",
     ],
     "Policies": [
@@ -62,7 +57,6 @@ STUBS_A = {
         "Grievance procedures are outlined in Chapter 4 of the Student Handbook.",
     ],
 }
-
 
 STUBS_B = {
     "Academic Calendar": [
@@ -98,6 +92,7 @@ STUBS_B = {
 }
 
 
+# ── Helpers ───────────────────────────────────────────────────────
 def get_logo_b64() -> str:
     p = Path("assets/logo.jpg")
     if p.exists():
@@ -112,7 +107,7 @@ def bot_avatar(logo_b64: str) -> str:
 
 
 def render_messages(messages: list, logo_b64: str) -> str:
-    html = ""
+    out = ""
     for msg in messages:
         text = (
             msg["content"]
@@ -121,19 +116,21 @@ def render_messages(messages: list, logo_b64: str) -> str:
             .replace(">", "&gt;")
             .replace("\n", "<br>")
         )
-
+        extra = ' style="border-left:3px solid #CC0000;background:#fff5f5;"' \
+            if msg.get("is_error") else ""
         if msg["role"] == "assistant":
-            html += f"""
-            <div class="msg-row">
-            {bot_avatar(logo_b64)}
-            <div class="bubble bot-bub">{text}</div>
-            </div>"""
+            out += f"""
+<div class="msg-row">
+  {bot_avatar(logo_b64)}
+  <div class="bubble bot-bub"{extra}>{text}</div>
+</div>"""
         else:
-            html += f"""
-            <div class="msg-row user-msg-row">
-            <div class="bubble user-bub">{text}</div>
-            </div>"""
-    return html
+            out += f"""
+<div class="msg-row user-msg-row">
+  <div class="bubble user-bub">{text}</div>
+  <div class="av-user">You</div>
+</div>"""
+    return out
 
 
 def stub_reply(panel: str, topic: str) -> str:
@@ -154,21 +151,14 @@ def ensure_message_ids(messages: list):
             msg["show_reason_picker"] = False
         if "sources" not in msg:
             msg["sources"] = []
-
         if msg["role"] == "assistant":
             if "message_id" not in msg:
                 msg["message_id"] = assistant_id
-
             if ENABLE_FEEDBACK:
-                if "feedback" not in msg:
-                    msg["feedback"] = None
-                if "feedback_saved" not in msg:
-                    msg["feedback_saved"] = False
-                if "dislike_reason" not in msg:
-                    msg["dislike_reason"] = None
-                if "dislike_comment" not in msg:
-                    msg["dislike_comment"] = ""
-
+                msg.setdefault("feedback", None)
+                msg.setdefault("feedback_saved", False)
+                msg.setdefault("dislike_reason", None)
+                msg.setdefault("dislike_comment", "")
             assistant_id += 1
 
 
@@ -177,101 +167,63 @@ def append_feedback_to_file(record: dict):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def get_previous_user_message(messages: list, assistant_idx: int):
+def get_previous_user_message(messages: list, assistant_idx: int) -> str:
     for j in range(assistant_idx - 1, -1, -1):
         if messages[j]["role"] == "user":
             return messages[j]["content"]
     return ""
 
 
-if ENABLE_FEEDBACK:
-    def save_feedback(response, panel_id: str, message_id: int):
-        st.session_state.page = "chat"
-        msg_key = f"messages_{panel_id.lower()}"
-        messages = st.session_state.get(msg_key, [])
-        for idx, msg in enumerate(messages):
-            if msg.get("message_id") == message_id:
-                st.session_state[msg_key][idx]["feedback"] = response
-                st.session_state[msg_key][idx]["feedback_saved"] = False
-                break
-
-    def save_final_feedback(panel_id: str, message_id: int, reason: str = None, comment: str = ""):
-        msg_key = f"messages_{panel_id.lower()}"
-        messages = st.session_state.get(msg_key, [])
-        for idx, msg in enumerate(messages):
-            if msg.get("message_id") == message_id:
-                if msg.get("feedback_saved"):
-                    return
-                user_question = get_previous_user_message(messages, idx)
-                feedback_obj = msg.get("feedback", {})
-                score = feedback_obj.get("score") if isinstance(feedback_obj, dict) else "unknown"
-                record = {
-                    "panel_id": panel_id,
-                    "message_id": message_id,
-                    "question": user_question,
-                    "answer": msg.get("content", ""),
-                    "score": score,
-                    "feedback_text": feedback_obj.get("text") if isinstance(feedback_obj, dict) else "",
-                    "reason": reason,
-                    "comment": comment,
-                }
-                try:
-                    append_feedback_to_file(record)
-                    st.session_state[msg_key][idx]["dislike_reason"] = reason
-                    st.session_state[msg_key][idx]["dislike_comment"] = comment
-                    st.session_state[msg_key][idx]["feedback_saved"] = True
-                except Exception as e:
-                    print(f"ERROR saving: {e}")
-                return
-
-
-def call_backend(endpoint: str, payload: dict):
-    r = requests.post(endpoint, json=payload, timeout=120)
+# ── Backend call ──────────────────────────────────────────────────
+def call_backend(endpoint: str, payload: dict) -> dict:
+    r = requests.post(endpoint, json=payload, timeout=60)
     r.raise_for_status()
     return r.json()
 
 
 def get_backend_reply(panel_id: str, user_input: str, topic: str):
     session_key = f"session_id_{panel_id.lower()}"
-    session_id = st.session_state.get(session_key)
+    session_id  = st.session_state.get(session_key)
 
     try:
         if panel_id == "A":
             endpoint = MODEL_A_ENDPOINT
-            payload = {
-                "question": user_input,
-                "method": "traffic_cop",
+            payload  = {
+                "question":   user_input,
+                "method":     "traffic_cop",
                 "session_id": session_id,
             }
         else:
             endpoint = MODEL_B_ENDPOINT
-            history = st.session_state.get("messages_b", [])
+            history  = st.session_state.get("messages_b", [])
             chat_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in history
                 if m.get("role") in ("user", "assistant")
             ]
             payload = {
-                "prompt": user_input,
-                "topic": topic or "",
-                "chat_history": chat_history,
-                "pending_context": st.session_state.get("pending_context_b"),
+                "prompt":          user_input,
+                "topic":           topic or "",
+                "chat_history":    chat_history,
+                "pending_context": None,
             }
 
         if not endpoint:
-            raise ValueError(f"Missing endpoint for panel {panel_id}")
+            raise ValueError(f"No endpoint configured for Panel {panel_id}. "
+                             "Set MODEL_A_ENDPOINT / MODEL_B_ENDPOINT in your .env file.")
 
         data = call_backend(endpoint, payload)
 
+        answer = (
+            data.get("answer")
+            or data.get("response")
+            or data.get("content")
+            or data.get("text")
+            or ""
+        )
+
+        # ── FIX: source_urls nested inside results.traffic_cop for Panel A ──
         if panel_id == "A":
-            answer = (
-                data.get("answer")
-                or data.get("response")
-                or data.get("content")
-                or data.get("text")
-                or ""
-            )
-            # source_urls can be top-level or nested inside results.traffic_cop
             sources = (
                 data.get("source_urls")
                 or data.get("sources")
@@ -281,19 +233,7 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
             if "session_id" in data:
                 st.session_state[session_key] = data["session_id"]
         else:
-            answer = (
-                data.get("response")
-                or data.get("answer")
-                or data.get("content")
-                or data.get("text")
-                or ""
-            )
             sources = data.get("source_urls") or data.get("sources") or []
-
-            if data.get("is_clarification"):
-                st.session_state["pending_context_b"] = data.get("pending_context")
-            else:
-                st.session_state["pending_context_b"] = None
 
         if isinstance(sources, str):
             sources = [sources]
@@ -302,216 +242,303 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
 
     except Exception as e:
         fallback = stub_reply(panel_id, topic)
-        return f"{fallback}\n\n[Backend unavailable: {e}]", []
+        return f"{fallback}\n\n_(Backend unavailable: {e})_", []
 
 
-def render_sources_block(sources, panel_id: str, message_id: int):
-    """Render sources as actual URLs, not 'Source 1', 'Source 2'."""
+# ── Sources block ─────────────────────────────────────────────────
+def render_sources_block(sources: list, panel_id: str, message_id: int):
     if not sources:
         return
-
     with st.expander("Sources", expanded=False):
         for i, src in enumerate(sources, start=1):
             if isinstance(src, dict):
-                url = src.get("url") or src.get("href") or ""
+                url   = src.get("url") or src.get("href") or ""
                 title = src.get("title") or src.get("label") or url or f"Source {i}"
             else:
-                url = str(src).strip()
+                url   = str(src).strip()
                 title = url  # ← show actual URL as the link text
-
-            if url:
-                st.markdown(f"[{title}]({url})")
-            else:
-                st.markdown(f"Source {i}")
+            st.markdown(f"- [{title}]({url})" if url else f"- Source {i}")
 
 
+# ── Feedback helpers ──────────────────────────────────────────────
+if ENABLE_FEEDBACK:
+    def save_final_feedback(panel_id: str, message_id: int,
+                            reason: str = None, comment: str = ""):
+        msg_key  = f"messages_{panel_id.lower()}"
+        messages = st.session_state.get(msg_key, [])
+        for idx, msg in enumerate(messages):
+            if msg.get("message_id") == message_id:
+                if msg.get("feedback_saved"):
+                    return
+                record = {
+                    "panel_id":      panel_id,
+                    "message_id":    message_id,
+                    "question":      get_previous_user_message(messages, idx),
+                    "answer":        msg.get("content", ""),
+                    "score":         (msg.get("feedback") or {}).get("score", "unknown"),
+                    "feedback_text": (msg.get("feedback") or {}).get("text", ""),
+                    "reason":        reason,
+                    "comment":       comment,
+                }
+                try:
+                    append_feedback_to_file(record)
+                    st.session_state[msg_key][idx].update({
+                        "dislike_reason":  reason,
+                        "dislike_comment": comment,
+                        "feedback_saved":  True,
+                    })
+                except Exception as e:
+                    st.error(f"Could not save feedback: {e}")
+                return
+
+
+# ── Pending-queue processing (parallel threads) ───────────────────
+def process_pending():
+    """
+    Drain queued messages for both panels concurrently using threads.
+    This prevents Panel B from being blocked when Panel A is waiting
+    for its backend response.
+    """
+    def handle_panel(panel_id):
+        pending = st.session_state.get(f"pending_{panel_id}")
+        if not pending:
+            return
+
+        msg_key  = f"messages_{panel_id.lower()}"
+        topic    = st.session_state.get("topic", "Academic Calendar")
+        messages = st.session_state.get(msg_key, [])
+
+        assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+
+        answer, sources = get_backend_reply(panel_id, pending, topic)
+
+        assistant_msg = {
+            "role":       "assistant",
+            "content":    answer,
+            "sources":    sources,
+            "message_id": assistant_count,
+        }
+        if ENABLE_FEEDBACK:
+            assistant_msg.update({
+                "feedback":           None,
+                "feedback_saved":     False,
+                "dislike_reason":     None,
+                "dislike_comment":    "",
+                "show_reason_picker": False,
+            })
+
+        messages.append(assistant_msg)
+        st.session_state[msg_key] = messages
+        st.session_state[f"pending_{panel_id}"] = None
+
+        rk = f"inp_reset_{panel_id}"
+        st.session_state[rk] = st.session_state.get(rk, 0) + 1
+
+    # Launch both panels in parallel
+    threads = []
+    for panel_id in ["A", "B"]:
+        if st.session_state.get(f"pending_{panel_id}"):
+            t = threading.Thread(target=handle_panel, args=(panel_id,))
+            threads.append(t)
+            t.start()
+
+    for t in threads:
+        t.join()
+
+
+# ── Single panel renderer ─────────────────────────────────────────
 def render_panel(panel_id: str, logo_b64: str):
-    msg_key = f"messages_{panel_id.lower()}"
-    inp_key = f"inp_{panel_id}"
-    form_key = f"form_{panel_id}"
-    topic = st.session_state.get("topic", "Academic Calendar")
+    msg_key    = f"messages_{panel_id.lower()}"
+    topic      = st.session_state.get("topic", "Academic Calendar")
+    messages   = st.session_state.get(msg_key, [])
+    is_pending = bool(st.session_state.get(f"pending_{panel_id}"))
 
-    messages = st.session_state.get(msg_key, [])
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
-    # ── Check if we are waiting for a backend reply ────────────────────────────
-    pending_key = f"pending_{panel_id}"
-    is_pending = st.session_state.get(pending_key, False)
+    # Animated thinking dots shown while API is in flight
+    thinking_html = ""
+    if is_pending:
+        thinking_html = f"""
+<div class="msg-row">
+  {bot_avatar(logo_b64)}
+  <div class="bubble bot-bub thinking-bub">
+    <span class="dot-pulse"></span>
+    <span class="dot-pulse" style="animation-delay:.2s"></span>
+    <span class="dot-pulse" style="animation-delay:.4s"></span>
+  </div>
+</div>"""
 
-    # ── Render chat messages ───────────────────────────────────────────────────
-    msgs_html = render_messages(messages, logo_b64)
+    msgs_html    = render_messages(messages, logo_b64)
+    thinking_tag = "<span class='thinking-tag'>thinking…</span>" if is_pending else ""
 
     st.markdown(f"""
 <div class="panel-wrap">
-  <div class="panel-head">Chatbot {panel_id} <span class="model-tag">Model {panel_id}</span></div>
-  <div class="msgs-area">{msgs_html}</div>
+  <div class="panel-head">
+    Chatbot {panel_id}
+    <span class="model-tag">Model {panel_id}</span>
+    {thinking_tag}
+  </div>
+  <div class="msgs-area" id="msgs-{panel_id}">{msgs_html}{thinking_html}</div>
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Show spinner while waiting for response ────────────────────────────────
-    if is_pending:
-        with st.spinner("Thinking..."):
-            user_input = st.session_state.get(f"pending_input_{panel_id}", "")
-            answer, sources = get_backend_reply(panel_id, user_input, topic)
-
-            assistant_count = sum(1 for m in messages if m["role"] == "assistant")
-            assistant_msg = {
-                "role": "assistant",
-                "content": answer,
-                "sources": sources,
-                "message_id": assistant_count,
-            }
-
-            if ENABLE_FEEDBACK:
-                assistant_msg.update({
-                    "feedback": None,
-                    "feedback_saved": False,
-                    "dislike_reason": None,
-                    "dislike_comment": "",
-                    "show_reason_picker": False,
-                })
-
-            messages.append(assistant_msg)
-            st.session_state[msg_key] = messages
-            st.session_state[pending_key] = False
-            st.session_state[f"pending_input_{panel_id}"] = ""
-            st.rerun()
-
-    # ── Sources for latest assistant message ───────────────────────────────────
+    # Sources for the latest assistant message
     latest_assistant = None
-    latest_idx = None
+    latest_idx       = None
     for idx in range(len(messages) - 1, -1, -1):
         if messages[idx]["role"] == "assistant":
             latest_assistant = messages[idx]
-            latest_idx = idx
+            latest_idx       = idx
             break
 
-    if latest_assistant is not None:
+    if latest_assistant:
         render_sources_block(
             latest_assistant.get("sources", []),
             panel_id,
-            latest_assistant["message_id"]
+            latest_assistant["message_id"],
         )
 
-    # ── Feedback ───────────────────────────────────────────────────────────────
+    # Feedback thumbs (only when enabled)
     if ENABLE_FEEDBACK and latest_assistant is not None:
-        btn1, btn2, _ = st.columns([1, 1, 10])
-
-        with btn1:
+        b1, b2, _ = st.columns([1, 1, 10])
+        with b1:
             if st.button("👍", key=f"like_{panel_id}_{latest_assistant['message_id']}"):
                 st.session_state[msg_key][latest_idx]["feedback"] = {"score": "👍", "text": ""}
                 st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
                 st.rerun()
-
-        with btn2:
+        with b2:
             if st.button("👎", key=f"dislike_{panel_id}_{latest_assistant['message_id']}"):
                 st.session_state[msg_key][latest_idx]["feedback"] = "down"
                 st.session_state[msg_key][latest_idx]["show_reason_picker"] = True
                 st.rerun()
 
-        if latest_idx is not None and st.session_state[msg_key][latest_idx].get("show_reason_picker", False):
+        if st.session_state[msg_key][latest_idx].get("show_reason_picker", False):
             selected_reason = st.radio(
                 "What went wrong?",
                 DISLIKE_REASONS,
                 key=f"reason_{panel_id}_{latest_assistant['message_id']}",
                 horizontal=True,
             )
-
             other_text = ""
             if selected_reason == "Other":
                 other_text = st.text_input(
                     "Tell us more",
                     key=f"other_{panel_id}_{latest_assistant['message_id']}",
-                    placeholder="Type the issue here..."
+                    placeholder="Type the issue here...",
                 )
-
             if st.button("Save feedback", key=f"save_fb_{panel_id}_{latest_assistant['message_id']}"):
                 final_comment = other_text.strip() if selected_reason == "Other" else ""
-                st.session_state[msg_key][latest_idx]["feedback"] = {"score": "👎", "text": ""}
-                st.session_state[msg_key][latest_idx]["dislike_reason"] = selected_reason
-                st.session_state[msg_key][latest_idx]["dislike_comment"] = final_comment
-                st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
-                save_final_feedback(
-                    panel_id,
-                    latest_assistant["message_id"],
-                    reason=selected_reason,
-                    comment=final_comment,
-                )
+                st.session_state[msg_key][latest_idx].update({
+                    "feedback":           {"score": "👎", "text": ""},
+                    "dislike_reason":     selected_reason,
+                    "dislike_comment":    final_comment,
+                    "show_reason_picker": False,
+                })
+                save_final_feedback(panel_id, latest_assistant["message_id"],
+                                    reason=selected_reason, comment=final_comment)
                 st.success("Feedback saved.")
                 st.rerun()
 
-    # ── Input form ─────────────────────────────────────────────────────────────
-    with st.form(key=form_key, clear_on_submit=True):
-        user_input = st.text_input(
-            label="msg",
-            key=inp_key,
-            placeholder="Ask me anything related to IIT...",
-            label_visibility="collapsed",
-            disabled=is_pending,  # disable input while waiting
+    # ── Input — uses pending-queue pattern so Panel B stays live ──
+    reset_count = st.session_state.get(f"inp_reset_{panel_id}", 0)
+    inp_key     = f"inp_{panel_id}_{reset_count}"
+
+    user_input = st.text_input(
+        label="msg",
+        key=inp_key,
+        placeholder="Ask me anything related to IIT...",
+        label_visibility="collapsed",
+        disabled=is_pending,
+    )
+
+    send_col, _ = st.columns([1, 3])
+    with send_col:
+        send_clicked = st.button(
+            "Send ➤",
+            key=f"send_{panel_id}",
+            use_container_width=True,
+            disabled=is_pending,
         )
 
-        send_col, _ = st.columns([1, 3])
-        with send_col:
-            clicked = st.form_submit_button(
-                "Send ➤",
-                key=f"send_{panel_id}",
-                use_container_width=True,
-                disabled=is_pending,  # disable button while waiting
-            )
+    st.markdown('<p class="inp-hint">Press Enter or click Send</p>', unsafe_allow_html=True)
 
-        st.markdown(
-            '<p class="inp-hint">Press Enter or click Send</p>',
-            unsafe_allow_html=True
-        )
+    if send_clicked and user_input.strip() and not is_pending:
+        clean_input = user_input.strip()
 
-        if clicked and user_input.strip() and not is_pending:
-            clean_input = user_input.strip()
+        # ── Append user message immediately so it shows right away ──
+        msg_list = st.session_state.get(msg_key, [])
+        msg_list.append({"role": "user", "content": clean_input, "sources": []})
+        st.session_state[msg_key] = msg_list
 
-            # ── FIX: append user message immediately so it shows right away ──
-            messages.append({
-                "role": "user",
-                "content": clean_input,
-                "sources": [],
-            })
-            st.session_state[msg_key] = messages
+        # Store in pending — process_pending() picks this up on next rerun
+        st.session_state[f"pending_{panel_id}"] = clean_input
 
-            # Store input and set pending flag — backend called on next rerun
-            st.session_state[f"pending_input_{panel_id}"] = clean_input
-            st.session_state[pending_key] = True
-            st.rerun()
+        rk = f"inp_reset_{panel_id}"
+        st.session_state[rk] = st.session_state.get(rk, 0) + 1
+        st.rerun()
 
 
+# ── Chat page ─────────────────────────────────────────────────────
 def render_chat_page():
+    # Step 1 — drain any pending API calls BEFORE drawing any widget
+    process_pending()
+
     st.session_state.page = "chat"
+
     if ENABLE_FEEDBACK:
         st.caption(f"Feedback file: {FEEDBACK_FILE.resolve()}")
-    logo_b64 = get_logo_b64()
 
-    t1, t2, t3 = st.columns([1, 7, 1])
+    logo_b64     = get_logo_b64()
+    theme        = st.session_state.get("theme", "light")
+    sidebar_open = st.session_state.get("sidebar_open", True)
+    theme_label  = "🌙 Dark" if theme == "light" else "☀️ Light"
+    toggle_label = "✕ Topics" if sidebar_open else "☰ Topics"
+
+    # Top bar
+    t1, t2, t3, t4 = st.columns([2, 5, 1, 1])
     with t1:
-        if st.button("←", key="home_btn"):
-            st.session_state.page = "home"
-
+        if st.button(toggle_label, key="sidebar_toggle"):
+            st.session_state.sidebar_open = not sidebar_open
+            st.rerun()
     with t2:
-        st.markdown('<p class="topbar-brand">IIT Chatbot</p>', unsafe_allow_html=True)
-
+        st.markdown('<p class="topbar-brand">🎓 IIT Chatbot</p>', unsafe_allow_html=True)
     with t3:
-        if st.button("?", key="help_btn"):
-            st.session_state.show_help = not st.session_state.get("show_help", False)
+        if st.button(theme_label, key="chat_theme_btn"):
+            st.session_state.theme = "dark" if theme == "light" else "light"
+            st.rerun()
+    with t4:
+        if st.button("🏠 Home", key="home_btn"):
+            st.session_state.page = "home"
+            st.rerun()
 
     st.markdown('<div class="topbar-line"></div>', unsafe_allow_html=True)
 
-    if st.session_state.get("show_help", False):
-        st.info(
-            "This chatbot can help with Academic Calendar, Tuition, Directory, Policies, and the Student Handbook.",
-            icon="ℹ️",
-        )
+    # Layout
+    if sidebar_open:
+        s_col, a_col, b_col = st.columns([1, 3, 3])
+    else:
+        a_col, b_col = st.columns(2)
+        s_col = None
 
-    a_col, b_col = st.columns([1, 1])
+    # Topic sidebar
+    if s_col:
+        with s_col:
+            st.markdown(
+                '<div class="sidebar-wrap"><div class="sidebar-lbl">Topics</div>',
+                unsafe_allow_html=True,
+            )
+            for t in TOPICS:
+                cls = "topic-active" if st.session_state.topic == t else "topic-idle"
+                st.markdown(f'<div class="topic-btn-wrap {cls}">', unsafe_allow_html=True)
+                if st.button(t, key=f"topic_{t}", use_container_width=True):
+                    st.session_state.topic = t
+                    st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
+    # Both panels — always fully interactive
     with a_col:
         render_panel("A", logo_b64)
-
     with b_col:
         render_panel("B", logo_b64)
