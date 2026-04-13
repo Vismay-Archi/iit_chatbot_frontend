@@ -111,29 +111,34 @@ def bot_avatar(logo_b64: str) -> str:
     return '<div class="av-fallback">IIT</div>'
 
 
-def render_messages(messages: list, logo_b64: str) -> str:
-    html = ""
-    for msg in messages:
-        text = (
-            msg["content"]
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\n", "<br>")
-        )
+def render_single_message(msg: dict, logo_b64: str) -> str:
+    """Render a single message bubble as HTML (no sources — those are rendered separately)."""
+    text = (
+        msg["content"]
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", "<br>")
+    )
+    if msg["role"] == "assistant":
+        return f"""
+        <div class="msg-row">
+        {bot_avatar(logo_b64)}
+        <div class="bubble bot-bub">{text}</div>
+        </div>"""
+    else:
+        return f"""
+        <div class="msg-row user-msg-row">
+        <div class="bubble user-bub">{text}</div>
+        </div>"""
 
-        if msg["role"] == "assistant":
-            html += f"""
-            <div class="msg-row">
-            {bot_avatar(logo_b64)}
-            <div class="bubble bot-bub">{text}</div>
-            </div>"""
-        else:
-            html += f"""
-            <div class="msg-row user-msg-row">
-            <div class="bubble user-bub">{text}</div>
-            </div>"""
-    return html
+
+def render_messages(messages: list, logo_b64: str) -> str:
+    """Legacy bulk renderer — kept for compatibility but no longer used in render_panel."""
+    html_out = ""
+    for msg in messages:
+        html_out += render_single_message(msg, logo_b64)
+    return html_out
 
 
 def stub_reply(panel: str, topic: str) -> str:
@@ -197,24 +202,12 @@ if ENABLE_FEEDBACK:
 
 
     def save_final_feedback(panel_id: str, message_id: int, reason: str = None, comment: str = ""):
-        print("=== SAVE FINAL FEEDBACK DEBUG ===")
-        print(f"panel_id='{panel_id}', message_id={message_id}, reason='{reason}', comment='{comment}'")
-        
         msg_key = f"messages_{panel_id.lower()}"
-        print(f"Looking for msg_key='{msg_key}'")
-        
         messages = st.session_state.get(msg_key, [])
-        print(f"Found {len(messages)} messages")
-        
-        found_match = False
+
         for idx, msg in enumerate(messages):
-            print(f"  msg[{idx}] message_id={msg.get('message_id')}")
             if msg.get("message_id") == message_id:
-                found_match = True
-                print(f"  --> MATCH at index {idx}")
-                
                 if msg.get("feedback_saved"):
-                    print("Already saved, exiting")
                     return
 
                 user_question = get_previous_user_message(messages, idx)
@@ -232,22 +225,16 @@ if ENABLE_FEEDBACK:
                     "comment": comment,
                 }
 
-                print(f"Saving record: {record}")
-                print(f"To file: {FEEDBACK_FILE.resolve()}")
-
                 try:
                     append_feedback_to_file(record)
                     st.session_state[msg_key][idx]["dislike_reason"] = reason
                     st.session_state[msg_key][idx]["dislike_comment"] = comment
                     st.session_state[msg_key][idx]["feedback_saved"] = True
-                    print("SUCCESS - all saved")
                 except Exception as e:
                     print(f"ERROR saving: {e}")
                 return
-        
-        print("ERROR - No message matched message_id")
 
-# ── Change 3: increased timeout from 60 to 120 seconds ────────────────────────
+
 def call_backend(endpoint: str, payload: dict):
     r = requests.post(endpoint, json=payload, timeout=120)
     r.raise_for_status()
@@ -277,7 +264,6 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
                 "prompt": user_input,
                 "topic": topic or "",
                 "chat_history": chat_history,
-                # ── Change 1: use stored pending_context instead of None ──────
                 "pending_context": st.session_state.get("pending_context_b"),
             }
 
@@ -307,7 +293,6 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
             )
             sources = data.get("source_urls") or data.get("sources") or []
 
-            # ── Change 2: store/clear pending_context_b based on response ────
             if data.get("is_clarification"):
                 st.session_state["pending_context_b"] = data.get("pending_context")
             else:
@@ -321,24 +306,109 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
     except Exception as e:
         fallback = stub_reply(panel_id, topic)
         return f"{fallback}\n\n[Backend unavailable: {e}]", []
-    
-def render_sources_block(sources, panel_id: str, message_id: int):
+
+
+# ── Sources panel styled to match Chatbot B ────────────────────────────────────
+SOURCES_CSS = """
+<style>
+.sources-panel {
+    background: #1a1a1a;
+    border-radius: 8px;
+    margin: 4px 0 12px 0;
+    overflow: hidden;
+    font-family: sans-serif;
+}
+.sources-header {
+    background: #1a1a1a;
+    color: #ffffff;
+    padding: 10px 16px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+}
+.sources-header .chevron { font-size: 0.75rem; }
+.sources-body {
+    background: #1a1a1a;
+    padding: 4px 16px 12px 16px;
+}
+.source-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-top: 1px solid #2e2e2e;
+}
+.source-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #555;
+    flex-shrink: 0;
+}
+.source-link {
+    color: #5b9bd5;
+    text-decoration: none;
+    font-size: 0.82rem;
+    word-break: break-all;
+}
+.source-link:hover { text-decoration: underline; }
+</style>
+"""
+
+def render_sources_panel(sources: list, panel_id: str, message_id: int):
+    """
+    Renders a dark collapsible Sources panel matching Chatbot B's style.
+    Uses st.expander internally but overrides its appearance with injected CSS.
+    """
     if not sources:
         return
 
-    with st.expander("Sources", expanded=False):
-        for i, src in enumerate(sources, start=1):
-            if isinstance(src, dict):
-                title = src.get("title") or src.get("label") or f"Source {i}"
-                url = src.get("url") or src.get("href") or ""
-            else:
-                title = f"Source {i}"
-                url = str(src).strip()
+    # Inject CSS once per session
+    css_key = f"sources_css_injected"
+    if not st.session_state.get(css_key):
+        st.markdown(SOURCES_CSS, unsafe_allow_html=True)
+        st.session_state[css_key] = True
 
-            if url:
-                st.markdown(f"- [{title}]({url})")
-            else:
-                st.markdown(f"- {title}")
+    # Build source rows HTML
+    rows_html = ""
+    for i, src in enumerate(sources, start=1):
+        if isinstance(src, dict):
+            title = src.get("title") or src.get("label") or f"Source {i}"
+            url = src.get("url") or src.get("href") or ""
+        else:
+            title = f"Source {i}"
+            url = str(src).strip()
+
+        if url:
+            rows_html += f"""
+            <div class="source-item">
+                <div class="source-dot"></div>
+                <a class="source-link" href="{url}" target="_blank">{title}</a>
+            </div>"""
+        else:
+            rows_html += f"""
+            <div class="source-item">
+                <div class="source-dot"></div>
+                <span class="source-link">{title}</span>
+            </div>"""
+
+    panel_html = f"""
+    <div class="sources-panel">
+      <details>
+        <summary class="sources-header">
+          <span class="chevron">▼</span> Sources
+        </summary>
+        <div class="sources-body">
+          {rows_html}
+        </div>
+      </details>
+    </div>
+    """
+    st.markdown(panel_html, unsafe_allow_html=True)
+
 
 def render_panel(panel_id: str, logo_b64: str):
     msg_key = f"messages_{panel_id.lower()}"
@@ -350,29 +420,26 @@ def render_panel(panel_id: str, logo_b64: str):
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
-    msgs_html = render_messages(messages, logo_b64)
-
+    # ── Panel header ───────────────────────────────────────────────────────────
     st.markdown(f"""
 <div class="panel-wrap">
   <div class="panel-head">Chatbot {panel_id} <span class="model-tag">Model {panel_id}</span></div>
-  <div class="msgs-area">{msgs_html}</div>
-</div>
+  <div class="msgs-area">
 """, unsafe_allow_html=True)
 
-    latest_assistant = None
-    for msg in reversed(messages):
+    # ── Render each message individually so sources appear after each bot reply ─
+    for msg in messages:
+        st.markdown(render_single_message(msg, logo_b64), unsafe_allow_html=True)
+
+        # After every assistant message, render its sources panel
         if msg["role"] == "assistant":
-            latest_assistant = msg
-            break
+            sources = msg.get("sources", [])
+            render_sources_panel(sources, panel_id, msg.get("message_id", 0))
 
-    if latest_assistant is not None:
-        render_sources_block(
-            latest_assistant.get("sources", []),
-            panel_id,
-            latest_assistant["message_id"]
-        )
+    st.markdown("</div></div>", unsafe_allow_html=True)
 
-        btn1, btn2, _ = st.columns([1, 1, 10])
+    # ── Feedback buttons (latest assistant message only) ───────────────────────
+    latest_assistant = None
     latest_idx = None
     for idx in range(len(messages) - 1, -1, -1):
         if messages[idx]["role"] == "assistant":
@@ -380,21 +447,20 @@ def render_panel(panel_id: str, logo_b64: str):
             latest_idx = idx
             break
 
-    if ENABLE_FEEDBACK:
-        if latest_assistant is not None:
-            btn1, btn2, _ = st.columns([1, 1, 10])
+    if ENABLE_FEEDBACK and latest_assistant is not None:
+        btn1, btn2, _ = st.columns([1, 1, 10])
 
-            with btn1:
-                if st.button("👍", key=f"like_{panel_id}_{latest_assistant['message_id']}"):
-                    st.session_state[msg_key][latest_idx]["feedback"] = {"score": "👍", "text": ""}
-                    st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
-                    st.rerun()
+        with btn1:
+            if st.button("👍", key=f"like_{panel_id}_{latest_assistant['message_id']}"):
+                st.session_state[msg_key][latest_idx]["feedback"] = {"score": "👍", "text": ""}
+                st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
+                st.rerun()
 
-            with btn2:
-                if st.button("👎", key=f"dislike_{panel_id}_{latest_assistant['message_id']}"):
-                    st.session_state[msg_key][latest_idx]["feedback"] = "down"
-                    st.session_state[msg_key][latest_idx]["show_reason_picker"] = True
-                    st.rerun()
+        with btn2:
+            if st.button("👎", key=f"dislike_{panel_id}_{latest_assistant['message_id']}"):
+                st.session_state[msg_key][latest_idx]["feedback"] = "down"
+                st.session_state[msg_key][latest_idx]["show_reason_picker"] = True
+                st.rerun()
 
         if st.session_state[msg_key][latest_idx].get("show_reason_picker", False):
             selected_reason = st.radio(
@@ -428,6 +494,7 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
+    # ── Input form ─────────────────────────────────────────────────────────────
     with st.form(key=form_key, clear_on_submit=True):
         user_input = st.text_input(
             label="msg",
@@ -477,7 +544,6 @@ def render_panel(panel_id: str, logo_b64: str):
                 })
 
             messages.append(assistant_msg)
-
             st.session_state[msg_key] = messages
             st.rerun()
 
