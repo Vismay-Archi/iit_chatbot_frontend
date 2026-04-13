@@ -11,8 +11,6 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 # ── Constants ─────────────────────────────────────────────────────
-TOPICS = ["Academic Calendar", "Tuition", "Directory", "Policies", "Handbook"]
-
 BASE_DIR         = Path(__file__).resolve().parent.parent
 FEEDBACK_FILE    = BASE_DIR / "feedback_log.jsonl"
 MODEL_A_ENDPOINT = os.getenv("MODEL_A_ENDPOINT", "").strip()
@@ -176,7 +174,7 @@ def get_previous_user_message(messages: list, assistant_idx: int) -> str:
 
 # ── Backend call ──────────────────────────────────────────────────
 def call_backend(endpoint: str, payload: dict) -> dict:
-    r = requests.post(endpoint, json=payload, timeout=60)
+    r = requests.post(endpoint, json=payload, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -209,8 +207,7 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
             }
 
         if not endpoint:
-            raise ValueError(f"No endpoint configured for Panel {panel_id}. "
-                             "Set MODEL_A_ENDPOINT / MODEL_B_ENDPOINT in your .env file.")
+            raise ValueError(f"No endpoint configured for Panel {panel_id}.")
 
         data = call_backend(endpoint, payload)
 
@@ -222,7 +219,6 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
             or ""
         )
 
-        # ── FIX: source_urls nested inside results.traffic_cop for Panel A ──
         if panel_id == "A":
             sources = (
                 data.get("source_urls")
@@ -256,7 +252,7 @@ def render_sources_block(sources: list, panel_id: str, message_id: int):
                 title = src.get("title") or src.get("label") or url or f"Source {i}"
             else:
                 url   = str(src).strip()
-                title = url  # ← show actual URL as the link text
+                title = url
             st.markdown(f"- [{title}]({url})" if url else f"- Source {i}")
 
 
@@ -294,11 +290,6 @@ if ENABLE_FEEDBACK:
 
 # ── Pending-queue processing (parallel threads) ───────────────────
 def process_pending():
-    """
-    Drain queued messages for both panels concurrently using threads.
-    This prevents Panel B from being blocked when Panel A is waiting
-    for its backend response.
-    """
     def handle_panel(panel_id):
         pending = st.session_state.get(f"pending_{panel_id}")
         if not pending:
@@ -309,7 +300,6 @@ def process_pending():
         messages = st.session_state.get(msg_key, [])
 
         assistant_count = sum(1 for m in messages if m["role"] == "assistant")
-
         answer, sources = get_backend_reply(panel_id, pending, topic)
 
         assistant_msg = {
@@ -334,7 +324,6 @@ def process_pending():
         rk = f"inp_reset_{panel_id}"
         st.session_state[rk] = st.session_state.get(rk, 0) + 1
 
-    # Launch both panels in parallel
     threads = []
     for panel_id in ["A", "B"]:
         if st.session_state.get(f"pending_{panel_id}"):
@@ -356,7 +345,6 @@ def render_panel(panel_id: str, logo_b64: str):
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
-    # Animated thinking dots shown while API is in flight
     thinking_html = ""
     if is_pending:
         thinking_html = f"""
@@ -370,7 +358,7 @@ def render_panel(panel_id: str, logo_b64: str):
 </div>"""
 
     msgs_html    = render_messages(messages, logo_b64)
-    thinking_tag = "<span class='thinking-tag'>thinking…</span>" if is_pending else ""
+    thinking_tag = "<span class='thinking-tag'>thinking...</span>" if is_pending else ""
 
     st.markdown(f"""
 <div class="panel-wrap">
@@ -383,7 +371,6 @@ def render_panel(panel_id: str, logo_b64: str):
 </div>
 """, unsafe_allow_html=True)
 
-    # Sources for the latest assistant message
     latest_assistant = None
     latest_idx       = None
     for idx in range(len(messages) - 1, -1, -1):
@@ -399,7 +386,6 @@ def render_panel(panel_id: str, logo_b64: str):
             latest_assistant["message_id"],
         )
 
-    # Feedback thumbs (only when enabled)
     if ENABLE_FEEDBACK and latest_assistant is not None:
         b1, b2, _ = st.columns([1, 1, 10])
         with b1:
@@ -440,7 +426,6 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
-    # ── Input — uses pending-queue pattern so Panel B stays live ──
     reset_count = st.session_state.get(f"inp_reset_{panel_id}", 0)
     inp_key     = f"inp_{panel_id}_{reset_count}"
 
@@ -455,7 +440,7 @@ def render_panel(panel_id: str, logo_b64: str):
     send_col, _ = st.columns([1, 3])
     with send_col:
         send_clicked = st.button(
-            "Send ➤",
+            "Send >",
             key=f"send_{panel_id}",
             use_container_width=True,
             disabled=is_pending,
@@ -466,12 +451,10 @@ def render_panel(panel_id: str, logo_b64: str):
     if send_clicked and user_input.strip() and not is_pending:
         clean_input = user_input.strip()
 
-        # ── Append user message immediately so it shows right away ──
         msg_list = st.session_state.get(msg_key, [])
         msg_list.append({"role": "user", "content": clean_input, "sources": []})
         st.session_state[msg_key] = msg_list
 
-        # Store in pending — process_pending() picks this up on next rerun
         st.session_state[f"pending_{panel_id}"] = clean_input
 
         rk = f"inp_reset_{panel_id}"
@@ -481,7 +464,6 @@ def render_panel(panel_id: str, logo_b64: str):
 
 # ── Chat page ─────────────────────────────────────────────────────
 def render_chat_page():
-    # Step 1 — drain any pending API calls BEFORE drawing any widget
     process_pending()
 
     st.session_state.page = "chat"
@@ -489,56 +471,37 @@ def render_chat_page():
     if ENABLE_FEEDBACK:
         st.caption(f"Feedback file: {FEEDBACK_FILE.resolve()}")
 
-    logo_b64     = get_logo_b64()
-    theme        = st.session_state.get("theme", "light")
-    sidebar_open = st.session_state.get("sidebar_open", True)
-    theme_label  = "🌙 Dark" if theme == "light" else "☀️ Light"
-    toggle_label = "✕ Topics" if sidebar_open else "☰ Topics"
+    logo_b64    = get_logo_b64()
+    theme       = st.session_state.get("theme", "light")
+    theme_label = "Dark" if theme == "light" else "Light"
 
-    # Top bar
-    t1, t2, t3, t4 = st.columns([2, 5, 1, 1])
+    t1, t2, t3, t4 = st.columns([1, 6, 1, 1])
     with t1:
-        if st.button(toggle_label, key="sidebar_toggle"):
-            st.session_state.sidebar_open = not sidebar_open
+        if st.button("<", key="back_btn"):
+            st.session_state.page = "home"
             st.rerun()
     with t2:
-        st.markdown('<p class="topbar-brand">🎓 IIT Chatbot</p>', unsafe_allow_html=True)
+        st.markdown('<p class="topbar-brand">IIT Chatbot</p>', unsafe_allow_html=True)
     with t3:
         if st.button(theme_label, key="chat_theme_btn"):
             st.session_state.theme = "dark" if theme == "light" else "light"
             st.rerun()
     with t4:
-        if st.button("🏠 Home", key="home_btn"):
-            st.session_state.page = "home"
-            st.rerun()
+        if st.button("?", key="help_btn"):
+            st.session_state.show_help = not st.session_state.get("show_help", False)
 
     st.markdown('<div class="topbar-line"></div>', unsafe_allow_html=True)
 
-    # Layout
-    if sidebar_open:
-        s_col, a_col, b_col = st.columns([1, 3, 3])
-    else:
-        a_col, b_col = st.columns(2)
-        s_col = None
+    if st.session_state.get("show_help", False):
+        st.info(
+            "This chatbot can help with Academic Calendar, Tuition, Directory, Policies, and the Student Handbook.",
+            icon="ℹ️",
+        )
 
-    # Topic sidebar
-    if s_col:
-        with s_col:
-            st.markdown(
-                '<div class="sidebar-wrap"><div class="sidebar-lbl">Topics</div>',
-                unsafe_allow_html=True,
-            )
-            for t in TOPICS:
-                cls = "topic-active" if st.session_state.topic == t else "topic-idle"
-                st.markdown(f'<div class="topic-btn-wrap {cls}">', unsafe_allow_html=True)
-                if st.button(t, key=f"topic_{t}", use_container_width=True):
-                    st.session_state.topic = t
-                    st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
+    a_col, b_col = st.columns(2)
 
-    # Both panels — always fully interactive
     with a_col:
         render_panel("A", logo_b64)
+
     with b_col:
         render_panel("B", logo_b64)
