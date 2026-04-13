@@ -144,6 +144,7 @@ def stub_reply(panel: str, topic: str) -> str:
     st.session_state[key] = idx + 1
     return replies[idx % len(replies)]
 
+
 def ensure_message_ids(messages: list):
     assistant_id = 0
     for i, msg in enumerate(messages):
@@ -182,45 +183,28 @@ def get_previous_user_message(messages: list, assistant_idx: int):
             return messages[j]["content"]
     return ""
 
+
 if ENABLE_FEEDBACK:
     def save_feedback(response, panel_id: str, message_id: int):
         st.session_state.page = "chat"
-
         msg_key = f"messages_{panel_id.lower()}"
         messages = st.session_state.get(msg_key, [])
-
         for idx, msg in enumerate(messages):
             if msg.get("message_id") == message_id:
                 st.session_state[msg_key][idx]["feedback"] = response
                 st.session_state[msg_key][idx]["feedback_saved"] = False
                 break
 
-
     def save_final_feedback(panel_id: str, message_id: int, reason: str = None, comment: str = ""):
-        print("=== SAVE FINAL FEEDBACK DEBUG ===")
-        print(f"panel_id='{panel_id}', message_id={message_id}, reason='{reason}', comment='{comment}'")
-        
         msg_key = f"messages_{panel_id.lower()}"
-        print(f"Looking for msg_key='{msg_key}'")
-        
         messages = st.session_state.get(msg_key, [])
-        print(f"Found {len(messages)} messages")
-        
-        found_match = False
         for idx, msg in enumerate(messages):
-            print(f"  msg[{idx}] message_id={msg.get('message_id')}")
             if msg.get("message_id") == message_id:
-                found_match = True
-                print(f"  --> MATCH at index {idx}")
-                
                 if msg.get("feedback_saved"):
-                    print("Already saved, exiting")
                     return
-
                 user_question = get_previous_user_message(messages, idx)
                 feedback_obj = msg.get("feedback", {})
                 score = feedback_obj.get("score") if isinstance(feedback_obj, dict) else "unknown"
-
                 record = {
                     "panel_id": panel_id,
                     "message_id": message_id,
@@ -231,26 +215,21 @@ if ENABLE_FEEDBACK:
                     "reason": reason,
                     "comment": comment,
                 }
-
-                print(f"Saving record: {record}")
-                print(f"To file: {FEEDBACK_FILE.resolve()}")
-
                 try:
                     append_feedback_to_file(record)
                     st.session_state[msg_key][idx]["dislike_reason"] = reason
                     st.session_state[msg_key][idx]["dislike_comment"] = comment
                     st.session_state[msg_key][idx]["feedback_saved"] = True
-                    print("SUCCESS - all saved")
                 except Exception as e:
                     print(f"ERROR saving: {e}")
                 return
-        
-        print("ERROR - No message matched message_id")
+
 
 def call_backend(endpoint: str, payload: dict):
     r = requests.post(endpoint, json=payload, timeout=120)
     r.raise_for_status()
     return r.json()
+
 
 def get_backend_reply(panel_id: str, user_input: str, topic: str):
     session_key = f"session_id_{panel_id.lower()}"
@@ -327,22 +306,23 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
 
 
 def render_sources_block(sources, panel_id: str, message_id: int):
+    """Render sources as actual URLs, not 'Source 1', 'Source 2'."""
     if not sources:
         return
 
     with st.expander("Sources", expanded=False):
         for i, src in enumerate(sources, start=1):
             if isinstance(src, dict):
-                title = src.get("title") or src.get("label") or f"Source {i}"
                 url = src.get("url") or src.get("href") or ""
+                title = src.get("title") or src.get("label") or url or f"Source {i}"
             else:
-                title = f"Source {i}"
                 url = str(src).strip()
+                title = url  # ← show actual URL as the link text
 
             if url:
                 st.markdown(f"[{title}]({url})")
             else:
-                st.markdown(f"{title}")
+                st.markdown(f"Source {i}")
 
 
 def render_panel(panel_id: str, logo_b64: str):
@@ -355,6 +335,11 @@ def render_panel(panel_id: str, logo_b64: str):
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
+    # ── Check if we are waiting for a backend reply ────────────────────────────
+    pending_key = f"pending_{panel_id}"
+    is_pending = st.session_state.get(pending_key, False)
+
+    # ── Render chat messages ───────────────────────────────────────────────────
     msgs_html = render_messages(messages, logo_b64)
 
     st.markdown(f"""
@@ -364,7 +349,36 @@ def render_panel(panel_id: str, logo_b64: str):
 </div>
 """, unsafe_allow_html=True)
 
-    # Show sources for the latest assistant message only
+    # ── Show spinner while waiting for response ────────────────────────────────
+    if is_pending:
+        with st.spinner("Thinking..."):
+            user_input = st.session_state.get(f"pending_input_{panel_id}", "")
+            answer, sources = get_backend_reply(panel_id, user_input, topic)
+
+            assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+            assistant_msg = {
+                "role": "assistant",
+                "content": answer,
+                "sources": sources,
+                "message_id": assistant_count,
+            }
+
+            if ENABLE_FEEDBACK:
+                assistant_msg.update({
+                    "feedback": None,
+                    "feedback_saved": False,
+                    "dislike_reason": None,
+                    "dislike_comment": "",
+                    "show_reason_picker": False,
+                })
+
+            messages.append(assistant_msg)
+            st.session_state[msg_key] = messages
+            st.session_state[pending_key] = False
+            st.session_state[f"pending_input_{panel_id}"] = ""
+            st.rerun()
+
+    # ── Sources for latest assistant message ───────────────────────────────────
     latest_assistant = None
     latest_idx = None
     for idx in range(len(messages) - 1, -1, -1):
@@ -380,21 +394,21 @@ def render_panel(panel_id: str, logo_b64: str):
             latest_assistant["message_id"]
         )
 
-    if ENABLE_FEEDBACK:
-        if latest_assistant is not None:
-            btn1, btn2, _ = st.columns([1, 1, 10])
+    # ── Feedback ───────────────────────────────────────────────────────────────
+    if ENABLE_FEEDBACK and latest_assistant is not None:
+        btn1, btn2, _ = st.columns([1, 1, 10])
 
-            with btn1:
-                if st.button("👍", key=f"like_{panel_id}_{latest_assistant['message_id']}"):
-                    st.session_state[msg_key][latest_idx]["feedback"] = {"score": "👍", "text": ""}
-                    st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
-                    st.rerun()
+        with btn1:
+            if st.button("👍", key=f"like_{panel_id}_{latest_assistant['message_id']}"):
+                st.session_state[msg_key][latest_idx]["feedback"] = {"score": "👍", "text": ""}
+                st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
+                st.rerun()
 
-            with btn2:
-                if st.button("👎", key=f"dislike_{panel_id}_{latest_assistant['message_id']}"):
-                    st.session_state[msg_key][latest_idx]["feedback"] = "down"
-                    st.session_state[msg_key][latest_idx]["show_reason_picker"] = True
-                    st.rerun()
+        with btn2:
+            if st.button("👎", key=f"dislike_{panel_id}_{latest_assistant['message_id']}"):
+                st.session_state[msg_key][latest_idx]["feedback"] = "down"
+                st.session_state[msg_key][latest_idx]["show_reason_picker"] = True
+                st.rerun()
 
         if latest_idx is not None and st.session_state[msg_key][latest_idx].get("show_reason_picker", False):
             selected_reason = st.radio(
@@ -418,7 +432,6 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.session_state[msg_key][latest_idx]["dislike_reason"] = selected_reason
                 st.session_state[msg_key][latest_idx]["dislike_comment"] = final_comment
                 st.session_state[msg_key][latest_idx]["show_reason_picker"] = False
-
                 save_final_feedback(
                     panel_id,
                     latest_assistant["message_id"],
@@ -428,12 +441,14 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
+    # ── Input form ─────────────────────────────────────────────────────────────
     with st.form(key=form_key, clear_on_submit=True):
         user_input = st.text_input(
             label="msg",
             key=inp_key,
             placeholder="Ask me anything related to IIT...",
             label_visibility="collapsed",
+            disabled=is_pending,  # disable input while waiting
         )
 
         send_col, _ = st.columns([1, 3])
@@ -442,6 +457,7 @@ def render_panel(panel_id: str, logo_b64: str):
                 "Send ➤",
                 key=f"send_{panel_id}",
                 use_container_width=True,
+                disabled=is_pending,  # disable button while waiting
             )
 
         st.markdown(
@@ -449,36 +465,20 @@ def render_panel(panel_id: str, logo_b64: str):
             unsafe_allow_html=True
         )
 
-        if clicked and user_input.strip():
-            assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+        if clicked and user_input.strip() and not is_pending:
             clean_input = user_input.strip()
 
+            # ── FIX: append user message immediately so it shows right away ──
             messages.append({
                 "role": "user",
-                "content": clean_input
+                "content": clean_input,
+                "sources": [],
             })
-
-            answer, sources = get_backend_reply(panel_id, clean_input, topic)
-
-            assistant_msg = {
-                "role": "assistant",
-                "content": answer,
-                "sources": sources,
-                "message_id": assistant_count,
-            }
-
-            if ENABLE_FEEDBACK:
-                assistant_msg.update({
-                    "feedback": None,
-                    "feedback_saved": False,
-                    "dislike_reason": None,
-                    "dislike_comment": "",
-                    "show_reason_picker": False,
-                })
-
-            messages.append(assistant_msg)
-
             st.session_state[msg_key] = messages
+
+            # Store input and set pending flag — backend called on next rerun
+            st.session_state[f"pending_input_{panel_id}"] = clean_input
+            st.session_state[pending_key] = True
             st.rerun()
 
 
