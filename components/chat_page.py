@@ -1,6 +1,8 @@
 import base64
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -15,6 +17,8 @@ FEEDBACK_FILE    = BASE_DIR / "feedback_log.jsonl"
 MODEL_A_ENDPOINT = os.getenv("MODEL_A_ENDPOINT", "").strip()
 MODEL_B_ENDPOINT = os.getenv("MODEL_B_ENDPOINT", "").strip()
 ENABLE_FEEDBACK  = False
+
+EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 DISLIKE_REASONS = [
     "Hallucination", "No clarification", "Not helpful",
@@ -91,9 +95,13 @@ STUBS_B = {
 
 # ── Helpers ───────────────────────────────────────────────────────
 def get_logo_b64() -> str:
-    p = Path("assets/logo.jpg")
-    if p.exists():
-        return base64.b64encode(p.read_bytes()).decode()
+    candidates = [
+        BASE_DIR / "assets" / "logo.jpg",
+        BASE_DIR / "assets" / "logo.png",
+    ]
+    for p in candidates:
+        if p.exists():
+            return base64.b64encode(p.read_bytes()).decode()
     return ""
 
 
@@ -142,20 +150,11 @@ def stub_reply(panel: str, topic: str) -> str:
 def ensure_message_ids(messages: list):
     assistant_id = 0
     for i, msg in enumerate(messages):
-        if "msg_id" not in msg:
-            msg["msg_id"] = i
-        if "show_reason_picker" not in msg:
-            msg["show_reason_picker"] = False
-        if "sources" not in msg:
-            msg["sources"] = []
+        msg.setdefault("msg_id", i)
+        msg.setdefault("show_reason_picker", False)
+        msg.setdefault("sources", [])
         if msg["role"] == "assistant":
-            if "message_id" not in msg:
-                msg["message_id"] = assistant_id
-            if ENABLE_FEEDBACK:
-                msg.setdefault("feedback", None)
-                msg.setdefault("feedback_saved", False)
-                msg.setdefault("dislike_reason", None)
-                msg.setdefault("dislike_comment", "")
+            msg.setdefault("message_id", assistant_id)
             assistant_id += 1
 
 
@@ -171,32 +170,30 @@ def get_previous_user_message(messages: list, assistant_idx: int) -> str:
     return ""
 
 
-# ── Backend call ──────────────────────────────────────────────────
-def call_backend(endpoint: str, payload: dict) -> dict:
-    r = requests.post(endpoint, json=payload, timeout=120)
-    r.raise_for_status()
-    return r.json()
+# ── Async state init ──────────────────────────────────────────────
+def ensure_async_state():
+    for panel_id in ["A", "B"]:
+        st.session_state.setdefault(f"future_{panel_id}", None)
+        st.session_state.setdefault(f"inp_reset_{panel_id}", 0)
 
 
-def get_backend_reply(panel_id: str, user_input: str, topic: str):
-    session_key = f"session_id_{panel_id.lower()}"
-    session_id  = st.session_state.get(session_key)
-
+# ── Backend worker (runs in thread) ──────────────────────────────
+def backend_worker(panel_id: str, user_input: str, topic: str,
+                   history: list, session_id: str) -> dict:
     try:
         if panel_id == "A":
             endpoint = MODEL_A_ENDPOINT
-            payload  = {
+            payload = {
                 "question":   user_input,
                 "method":     "traffic_cop",
                 "session_id": session_id,
             }
         else:
             endpoint = MODEL_B_ENDPOINT
-            history  = st.session_state.get("messages_b", [])
             chat_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in history
-                if m.get("role") in ("user", "assistant")
+                if m["role"] in ("user", "assistant")
             ]
             payload = {
                 "prompt":          user_input,
@@ -205,10 +202,9 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
                 "pending_context": None,
             }
 
-        if not endpoint:
-            raise ValueError(f"No endpoint configured for Panel {panel_id}.")
-
-        data = call_backend(endpoint, payload)
+        r = requests.post(endpoint, json=payload, timeout=(10, 120))
+        r.raise_for_status()
+        data = r.json()
 
         answer = (
             data.get("answer")
@@ -218,6 +214,7 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
             or ""
         )
 
+        # ── FIX: Panel A sources nested inside results.traffic_cop ──
         if panel_id == "A":
             sources = (
                 data.get("source_urls")
@@ -225,19 +222,45 @@ def get_backend_reply(panel_id: str, user_input: str, topic: str):
                 or data.get("results", {}).get("traffic_cop", {}).get("source_urls")
                 or []
             )
-            if "session_id" in data:
-                st.session_state[session_key] = data["session_id"]
         else:
             sources = data.get("source_urls") or data.get("sources") or []
 
         if isinstance(sources, str):
             sources = [sources]
 
-        return (answer.strip() if answer else "No response returned."), sources
+        return {
+            "answer":     answer.strip() if answer else "No response returned.",
+            "sources":    sources,
+            "session_id": data.get("session_id", session_id),
+            "is_error":   False,
+        }
 
     except Exception as e:
-        fallback = stub_reply(panel_id, topic)
-        return f"{fallback}\n\n_(Backend unavailable: {e})_", []
+        return {
+            "answer":     f"Backend unavailable: {e}",
+            "sources":    [],
+            "session_id": session_id,
+            "is_error":   True,
+        }
+
+
+# ── Submit to thread pool ─────────────────────────────────────────
+def submit_request(panel_id: str, user_input: str, topic: str):
+    future_key  = f"future_{panel_id}"
+    msg_key     = f"messages_{panel_id.lower()}"
+    session_key = f"session_id_{panel_id.lower()}"
+
+    # Don't submit if already in flight
+    future = st.session_state.get(future_key)
+    if future and not future.done():
+        return
+
+    history    = list(st.session_state.get(msg_key, []))
+    session_id = st.session_state.get(session_key)
+
+    st.session_state[future_key] = EXECUTOR.submit(
+        backend_worker, panel_id, user_input, topic, history, session_id
+    )
 
 
 # ── Sources block ─────────────────────────────────────────────────
@@ -287,94 +310,38 @@ if ENABLE_FEEDBACK:
                 return
 
 
-# ── process_pending ───────────────────────────────────────────────
-def process_pending():
-    """
-    4-step flow:
-
-    Step 1 — User submits form:
-      -> user msg appended instantly to chat
-      -> pending_{panel} = input text
-      -> st.rerun()                          <- rerun #1
-
-    Step 2 — rerun #1:
-      -> process_pending() finds pending_{panel}
-      -> sets fetching_{panel} = True
-      -> st.rerun()                          <- rerun #2
-         (page renders with thinking dots visible)
-
-    Step 3 — rerun #2:
-      -> process_pending() finds fetching_{panel}
-      -> calls backend API (blocks here ~7s)
-      -> appends assistant message
-      -> clears fetching_{panel}
-      -> st.rerun()                          <- rerun #3
-
-    Step 4 — rerun #3:
-      -> process_pending() finds nothing
-      -> renders both panels with answer visible
-    """
-    # Phase B: fetching flag is set — call backend now
-    for panel_id in ["A", "B"]:
-        if not st.session_state.get(f"fetching_{panel_id}"):
-            continue
-
-        msg_key  = f"messages_{panel_id.lower()}"
-        topic    = st.session_state.get("topic", "Academic Calendar")
-        messages = st.session_state.get(msg_key, [])
-        pending  = st.session_state.get(f"pending_{panel_id}", "")
-
-        assistant_count = sum(1 for m in messages if m["role"] == "assistant")
-
-        answer, sources = get_backend_reply(panel_id, pending, topic)
-
-        assistant_msg = {
-            "role":       "assistant",
-            "content":    answer,
-            "sources":    sources,
-            "message_id": assistant_count,
-        }
-        if ENABLE_FEEDBACK:
-            assistant_msg.update({
-                "feedback":           None,
-                "feedback_saved":     False,
-                "dislike_reason":     None,
-                "dislike_comment":    "",
-                "show_reason_picker": False,
-            })
-
-        messages.append(assistant_msg)
-        st.session_state[msg_key]                = messages
-        st.session_state[f"pending_{panel_id}"]  = None
-        st.session_state[f"fetching_{panel_id}"] = False
-
-        rk = f"inp_reset_{panel_id}"
-        st.session_state[rk] = st.session_state.get(rk, 0) + 1
-
-        st.rerun()  # rerun #3
-
-    # Phase A: pending flag is set — set fetching and rerun to show dots
-    for panel_id in ["A", "B"]:
-        if st.session_state.get(f"pending_{panel_id}"):
-            st.session_state[f"fetching_{panel_id}"] = True
-            st.rerun()  # rerun #2 — thinking dots now visible
-
-
 # ── Single panel renderer ─────────────────────────────────────────
 def render_panel(panel_id: str, logo_b64: str):
-    msg_key    = f"messages_{panel_id.lower()}"
-    topic      = st.session_state.get("topic", "Academic Calendar")
-    messages   = st.session_state.get(msg_key, [])
+    msg_key = f"messages_{panel_id.lower()}"
+    topic   = st.session_state.get("topic", "Academic Calendar")
+    messages = st.session_state.get(msg_key, [])
 
-    # Show thinking state if pending OR fetching
-    is_pending = bool(
-        st.session_state.get(f"pending_{panel_id}") or
-        st.session_state.get(f"fetching_{panel_id}")
-    )
+    future     = st.session_state.get(f"future_{panel_id}")
+    is_pending = future is not None and not future.done()
 
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
+    # ── If future just completed, collect result and rerun ────────
+    if future and future.done():
+        result = future.result()
+
+        assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+        messages.append({
+            "role":       "assistant",
+            "content":    result["answer"],
+            "sources":    result["sources"],
+            "message_id": assistant_count,
+            "is_error":   result["is_error"],
+        })
+
+        st.session_state[msg_key]                          = messages
+        st.session_state[f"session_id_{panel_id.lower()}"] = result["session_id"]
+        st.session_state[f"future_{panel_id}"]             = None
+        st.session_state[f"inp_reset_{panel_id}"]         += 1
+        st.rerun()
+
+    # ── Render chat bubbles ───────────────────────────────────────
     thinking_html = ""
     if is_pending:
         thinking_html = f"""
@@ -401,7 +368,7 @@ def render_panel(panel_id: str, logo_b64: str):
 </div>
 """, unsafe_allow_html=True)
 
-    # Sources for latest assistant message
+    # ── Sources for latest assistant message ──────────────────────
     latest_assistant = None
     latest_idx       = None
     for idx in range(len(messages) - 1, -1, -1):
@@ -417,6 +384,7 @@ def render_panel(panel_id: str, logo_b64: str):
             latest_assistant["message_id"],
         )
 
+    # ── Feedback ──────────────────────────────────────────────────
     if ENABLE_FEEDBACK and latest_assistant is not None:
         b1, b2, _ = st.columns([1, 1, 10])
         with b1:
@@ -457,12 +425,11 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
-    # ── Input form (st.form prevents page dim on Enter) ───────────
+    # ── Input form ────────────────────────────────────────────────
     reset_count = st.session_state.get(f"inp_reset_{panel_id}", 0)
-    form_key    = f"form_{panel_id}_{reset_count}"
     inp_key     = f"inp_{panel_id}_{reset_count}"
 
-    with st.form(key=form_key, clear_on_submit=True):
+    with st.form(key=f"form_{panel_id}_{reset_count}", clear_on_submit=True):
         user_input = st.text_input(
             label="msg",
             key=inp_key,
@@ -472,7 +439,7 @@ def render_panel(panel_id: str, logo_b64: str):
         )
         send_col, _ = st.columns([1, 3])
         with send_col:
-            send_clicked = st.form_submit_button(
+            submitted = st.form_submit_button(
                 "Send >",
                 use_container_width=True,
                 disabled=is_pending,
@@ -480,38 +447,37 @@ def render_panel(panel_id: str, logo_b64: str):
 
     st.markdown('<p class="inp-hint">Press Enter or click Send</p>', unsafe_allow_html=True)
 
-    if send_clicked and user_input.strip() and not is_pending:
+    if submitted and user_input.strip() and not is_pending:
         clean_input = user_input.strip()
 
-        # Append user message immediately so it shows right away
-        msg_list = st.session_state.get(msg_key, [])
-        msg_list.append({"role": "user", "content": clean_input, "sources": []})
-        st.session_state[msg_key] = msg_list
+        # Append user message immediately
+        messages.append({"role": "user", "content": clean_input, "sources": []})
+        st.session_state[msg_key] = messages
 
-        # Store pending — process_pending() picks this up on rerun #1
-        st.session_state[f"pending_{panel_id}"] = clean_input
+        # Submit to thread pool — returns immediately, runs in background
+        submit_request(panel_id, clean_input, topic)
 
-        rk = f"inp_reset_{panel_id}"
-        st.session_state[rk] = st.session_state.get(rk, 0) + 1
+        st.session_state[f"inp_reset_{panel_id}"] += 1
 
-        st.rerun()  # rerun #1
+        # Poll until future is done, rerunning every 0.5s to update UI
+        while True:
+            future = st.session_state.get(f"future_{panel_id}")
+            if future is None or future.done():
+                break
+            time.sleep(0.5)
+            st.rerun()
 
 
 # ── Chat page entry point ─────────────────────────────────────────
 def render_chat_page():
-    # FIRST: drain any pending API calls before drawing any widget
-    process_pending()
+    ensure_async_state()
 
     st.session_state.page = "chat"
-
-    if ENABLE_FEEDBACK:
-        st.caption(f"Feedback file: {FEEDBACK_FILE.resolve()}")
 
     logo_b64    = get_logo_b64()
     theme       = st.session_state.get("theme", "light")
     theme_label = "Dark" if theme == "light" else "Light"
 
-    # Top bar — back button, title + subheading, dark/light toggle
     t1, t2, t3 = st.columns([1, 6, 1])
     with t1:
         if st.button("<", key="back_btn"):
@@ -531,9 +497,7 @@ def render_chat_page():
     st.markdown('<div class="topbar-line"></div>', unsafe_allow_html=True)
 
     a_col, b_col = st.columns(2)
-
     with a_col:
         render_panel("A", logo_b64)
-
     with b_col:
         render_panel("B", logo_b64)
