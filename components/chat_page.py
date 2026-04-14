@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -137,15 +138,6 @@ def render_messages(messages: list, logo_b64: str) -> str:
     return out
 
 
-def stub_reply(panel: str, topic: str) -> str:
-    stubs = STUBS_A if panel == "A" else STUBS_B
-    replies = stubs.get(topic, ["Please check the IIT website for more details."])
-    key = f"stub_idx_{panel}"
-    idx = st.session_state.get(key, 0)
-    st.session_state[key] = idx + 1
-    return replies[idx % len(replies)]
-
-
 def ensure_message_ids(messages: list):
     assistant_id = 0
     for i, msg in enumerate(messages):
@@ -154,6 +146,11 @@ def ensure_message_ids(messages: list):
         msg.setdefault("sources", [])
         if msg["role"] == "assistant":
             msg.setdefault("message_id", assistant_id)
+            if ENABLE_FEEDBACK:
+                msg.setdefault("feedback", None)
+                msg.setdefault("feedback_saved", False)
+                msg.setdefault("dislike_reason", None)
+                msg.setdefault("dislike_comment", "")
             assistant_id += 1
 
 
@@ -169,16 +166,19 @@ def get_previous_user_message(messages: list, assistant_idx: int) -> str:
     return ""
 
 
-# ── Async state init ──────────────────────────────────────────────
 def ensure_async_state():
     for panel_id in ["A", "B"]:
         st.session_state.setdefault(f"future_{panel_id}", None)
+        st.session_state.setdefault(f"future_meta_{panel_id}", None)
         st.session_state.setdefault(f"inp_reset_{panel_id}", 0)
 
 
-# ── Backend worker (runs in thread) ──────────────────────────────
+# ── Backend worker (pure — no st.session_state access) ───────────
 def backend_worker(panel_id: str, user_input: str, topic: str,
-                   history: list, session_id: str) -> dict:
+                   session_id: str, history: list) -> dict:
+    """
+    Runs in a thread. Must NOT read or write st.session_state.
+    """
     try:
         if panel_id == "A":
             endpoint = MODEL_A_ENDPOINT
@@ -192,7 +192,7 @@ def backend_worker(panel_id: str, user_input: str, topic: str,
             chat_history = [
                 {"role": m["role"], "content": m["content"]}
                 for m in history
-                if m["role"] in ("user", "assistant")
+                if m.get("role") in ("user", "assistant")
             ]
             payload = {
                 "prompt":          user_input,
@@ -200,6 +200,9 @@ def backend_worker(panel_id: str, user_input: str, topic: str,
                 "chat_history":    chat_history,
                 "pending_context": None,
             }
+
+        if not endpoint:
+            raise ValueError(f"No endpoint configured for Panel {panel_id}.")
 
         r = requests.post(endpoint, json=payload, timeout=(10, 120))
         r.raise_for_status()
@@ -220,21 +223,26 @@ def backend_worker(panel_id: str, user_input: str, topic: str,
                 or data.get("results", {}).get("traffic_cop", {}).get("source_urls")
                 or []
             )
+            returned_session_id = data.get("session_id", session_id)
         else:
             sources = data.get("source_urls") or data.get("sources") or []
+            returned_session_id = session_id
 
         if isinstance(sources, str):
             sources = [sources]
 
         return {
+            "ok":         True,
             "answer":     answer.strip() if answer else "No response returned.",
             "sources":    sources,
-            "session_id": data.get("session_id", session_id),
+            "session_id": returned_session_id,
             "is_error":   False,
         }
 
     except Exception as e:
+        # No st.session_state here — just return a plain error dict
         return {
+            "ok":         False,
             "answer":     f"Backend unavailable: {e}",
             "sources":    [],
             "session_id": session_id,
@@ -242,64 +250,81 @@ def backend_worker(panel_id: str, user_input: str, topic: str,
         }
 
 
-# ── Submit to thread pool ─────────────────────────────────────────
 def submit_request(panel_id: str, user_input: str, topic: str):
     future_key  = f"future_{panel_id}"
-    msg_key     = f"messages_{panel_id.lower()}"
+    meta_key    = f"future_meta_{panel_id}"
     session_key = f"session_id_{panel_id.lower()}"
+    msg_key     = f"messages_{panel_id.lower()}"
 
-    future = st.session_state.get(future_key)
-    if future and not future.done():
+    current_future = st.session_state.get(future_key)
+    if current_future is not None and not current_future.done():
         return
 
     history    = list(st.session_state.get(msg_key, []))
-    session_id = st.session_state.get(session_key)
+    session_id = st.session_state.get(session_key, "")
 
-    st.session_state[future_key] = EXECUTOR.submit(
-        backend_worker, panel_id, user_input, topic, history, session_id
+    future = EXECUTOR.submit(
+        backend_worker, panel_id, user_input, topic, session_id, history
     )
 
+    st.session_state[future_key] = future
+    st.session_state[meta_key]   = {
+        "submitted_at": time.time(),
+        "user_input":   user_input,
+    }
 
-# ── Collect completed futures (called once at top of page) ────────
-def collect_completed_futures():
-    """
-    Called ONCE at the top of render_chat_page before any widgets.
-    - If a future is done: collect result, save answer, clear future, rerun
-    - If futures are still running: do nothing — page renders normally
-      with thinking state visible. User interaction or the next natural
-      rerun will trigger this again to collect the result.
-    """
-    collected = False
 
+def harvest_completed_responses():
+    """
+    Pull finished worker results into session_state on the main thread.
+    Called once at the top of render_chat_page.
+    """
     for panel_id in ["A", "B"]:
-        future = st.session_state.get(f"future_{panel_id}")
-        if future is None:
-            continue
-        if not future.done():
+        future_key  = f"future_{panel_id}"
+        meta_key    = f"future_meta_{panel_id}"
+        session_key = f"session_id_{panel_id.lower()}"
+        msg_key     = f"messages_{panel_id.lower()}"
+
+        future = st.session_state.get(future_key)
+        if future is None or not future.done():
             continue
 
-        # Future is done — collect result
-        result   = future.result()
-        msg_key  = f"messages_{panel_id.lower()}"
-        messages = st.session_state.get(msg_key, [])
+        try:
+            result = future.result()
+        except Exception as e:
+            result = {
+                "ok":         False,
+                "answer":     f"An unexpected error occurred: {e}",
+                "sources":    [],
+                "session_id": st.session_state.get(session_key, ""),
+                "is_error":   True,
+            }
 
+        messages        = st.session_state.get(msg_key, [])
         assistant_count = sum(1 for m in messages if m["role"] == "assistant")
-        messages.append({
+
+        assistant_msg = {
             "role":       "assistant",
             "content":    result["answer"],
-            "sources":    result["sources"],
+            "sources":    result.get("sources", []),
             "message_id": assistant_count,
-            "is_error":   result["is_error"],
-        })
+            "is_error":   result.get("is_error", False),
+        }
+        if ENABLE_FEEDBACK:
+            assistant_msg.update({
+                "feedback":           None,
+                "feedback_saved":     False,
+                "dislike_reason":     None,
+                "dislike_comment":    "",
+                "show_reason_picker": False,
+            })
 
-        st.session_state[msg_key]                           = messages
-        st.session_state[f"session_id_{panel_id.lower()}"]  = result["session_id"]
-        st.session_state[f"future_{panel_id}"]              = None
-        st.session_state[f"inp_reset_{panel_id}"]          += 1
-        collected = True
-
-    if collected:
-        st.rerun()
+        messages.append(assistant_msg)
+        st.session_state[msg_key]   = messages
+        st.session_state[session_key] = result.get("session_id", "")
+        st.session_state[future_key]  = None
+        st.session_state[meta_key]    = None
+        st.session_state[f"inp_reset_{panel_id}"] += 1
 
 
 # ── Sources block ─────────────────────────────────────────────────
@@ -354,14 +379,12 @@ def render_panel(panel_id: str, logo_b64: str):
     msg_key  = f"messages_{panel_id.lower()}"
     topic    = st.session_state.get("topic", "Academic Calendar")
     messages = st.session_state.get(msg_key, [])
-
-    future     = st.session_state.get(f"future_{panel_id}")
+    future   = st.session_state.get(f"future_{panel_id}")
     is_pending = future is not None and not future.done()
 
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
-    # ── Render chat bubbles ───────────────────────────────────────
     thinking_html = ""
     if is_pending:
         thinking_html = f"""
@@ -388,7 +411,6 @@ def render_panel(panel_id: str, logo_b64: str):
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Sources for latest assistant message ──────────────────────
     latest_assistant = None
     latest_idx       = None
     for idx in range(len(messages) - 1, -1, -1):
@@ -404,7 +426,6 @@ def render_panel(panel_id: str, logo_b64: str):
             latest_assistant["message_id"],
         )
 
-    # ── Feedback ──────────────────────────────────────────────────
     if ENABLE_FEEDBACK and latest_assistant is not None:
         b1, b2, _ = st.columns([1, 1, 10])
         with b1:
@@ -445,36 +466,36 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
-    # ── Input form ────────────────────────────────────────────────
+    # ── Input ─────────────────────────────────────────────────────
     reset_count = st.session_state.get(f"inp_reset_{panel_id}", 0)
     inp_key     = f"inp_{panel_id}_{reset_count}"
 
-    with st.form(key=f"form_{panel_id}_{reset_count}", clear_on_submit=True):
-        user_input = st.text_input(
-            label="msg",
-            key=inp_key,
-            placeholder="Ask me anything related to IIT...",
-            label_visibility="collapsed",
+    user_input = st.text_input(
+        label="msg",
+        key=inp_key,
+        placeholder="Ask me anything related to IIT...",
+        label_visibility="collapsed",
+        disabled=is_pending,
+    )
+
+    send_col, _ = st.columns([1, 3])
+    with send_col:
+        send_clicked = st.button(
+            "Send >",
+            key=f"send_{panel_id}",
+            use_container_width=True,
             disabled=is_pending,
         )
-        send_col, _ = st.columns([1, 3])
-        with send_col:
-            submitted = st.form_submit_button(
-                "Send >",
-                use_container_width=True,
-                disabled=is_pending,
-            )
 
     st.markdown('<p class="inp-hint">Press Enter or click Send</p>', unsafe_allow_html=True)
 
-    if submitted and user_input.strip() and not is_pending:
+    if send_clicked and user_input.strip() and not is_pending:
         clean_input = user_input.strip()
 
-        # Append user message immediately
-        messages.append({"role": "user", "content": clean_input, "sources": []})
-        st.session_state[msg_key] = messages
+        msg_list = st.session_state.get(msg_key, [])
+        msg_list.append({"role": "user", "content": clean_input, "sources": []})
+        st.session_state[msg_key] = msg_list
 
-        # Submit to thread — returns immediately
         submit_request(panel_id, clean_input, topic)
 
         st.session_state[f"inp_reset_{panel_id}"] += 1
@@ -485,8 +506,8 @@ def render_panel(panel_id: str, logo_b64: str):
 def render_chat_page():
     ensure_async_state()
 
-    # Collect any completed futures FIRST — no polling, no sleep
-    collect_completed_futures()
+    # Collect any completed futures before drawing widgets
+    harvest_completed_responses()
 
     st.session_state.page = "chat"
 
@@ -494,6 +515,7 @@ def render_chat_page():
     theme       = st.session_state.get("theme", "light")
     theme_label = "Dark" if theme == "light" else "Light"
 
+    # Top bar — no help/? button, subheading under title
     t1, t2, t3 = st.columns([1, 6, 1])
     with t1:
         if st.button("<", key="back_btn"):
@@ -517,3 +539,15 @@ def render_chat_page():
         render_panel("A", logo_b64)
     with b_col:
         render_panel("B", logo_b64)
+
+    # ── Light polling at the BOTTOM after both panels are drawn ───
+    # This ensures thinking dots are visible before the next rerun.
+    # 0.8s sleep keeps CPU low while still feeling responsive.
+    running = any(
+        st.session_state.get(f"future_{p}") is not None and
+        not st.session_state[f"future_{p}"].done()
+        for p in ["A", "B"]
+    )
+    if running:
+        time.sleep(0.8)
+        st.rerun()
