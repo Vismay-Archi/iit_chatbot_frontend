@@ -214,7 +214,6 @@ def backend_worker(panel_id: str, user_input: str, topic: str,
             or ""
         )
 
-        # ── FIX: Panel A sources nested inside results.traffic_cop ──
         if panel_id == "A":
             sources = (
                 data.get("source_urls")
@@ -250,7 +249,6 @@ def submit_request(panel_id: str, user_input: str, topic: str):
     msg_key     = f"messages_{panel_id.lower()}"
     session_key = f"session_id_{panel_id.lower()}"
 
-    # Don't submit if already in flight
     future = st.session_state.get(future_key)
     if future and not future.done():
         return
@@ -261,6 +259,57 @@ def submit_request(panel_id: str, user_input: str, topic: str):
     st.session_state[future_key] = EXECUTOR.submit(
         backend_worker, panel_id, user_input, topic, history, session_id
     )
+
+
+# ── Check and collect completed futures ──────────────────────────
+def collect_completed_futures():
+    """
+    Called at the TOP of render_chat_page before drawing anything.
+    If any future is done, collect result and rerun to show answer.
+    If any future is still running, sleep briefly and rerun to keep
+    thinking dots animated — without blocking the other panel.
+    """
+    any_pending = False
+
+    for panel_id in ["A", "B"]:
+        future = st.session_state.get(f"future_{panel_id}")
+        if future is None:
+            continue
+
+        if future.done():
+            # Collect result
+            result  = future.result()
+            msg_key = f"messages_{panel_id.lower()}"
+            messages = st.session_state.get(msg_key, [])
+
+            assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+            messages.append({
+                "role":       "assistant",
+                "content":    result["answer"],
+                "sources":    result["sources"],
+                "message_id": assistant_count,
+                "is_error":   result["is_error"],
+            })
+
+            st.session_state[msg_key]                           = messages
+            st.session_state[f"session_id_{panel_id.lower()}"]  = result["session_id"]
+            st.session_state[f"future_{panel_id}"]              = None
+            st.session_state[f"inp_reset_{panel_id}"]          += 1
+
+        else:
+            any_pending = True
+
+    if any_pending:
+        # Sleep briefly then rerun — keeps both panels rendering
+        # and thinking dots animating without blocking either panel
+        time.sleep(0.5)
+        st.rerun()
+
+    elif any(st.session_state.get(f"future_{p}") is None and
+             st.session_state.get(f"inp_reset_{p}", 0) > 0
+             for p in ["A", "B"]):
+        # A future just completed — rerun once to show the answer
+        pass
 
 
 # ── Sources block ─────────────────────────────────────────────────
@@ -312,8 +361,8 @@ if ENABLE_FEEDBACK:
 
 # ── Single panel renderer ─────────────────────────────────────────
 def render_panel(panel_id: str, logo_b64: str):
-    msg_key = f"messages_{panel_id.lower()}"
-    topic   = st.session_state.get("topic", "Academic Calendar")
+    msg_key  = f"messages_{panel_id.lower()}"
+    topic    = st.session_state.get("topic", "Academic Calendar")
     messages = st.session_state.get(msg_key, [])
 
     future     = st.session_state.get(f"future_{panel_id}")
@@ -321,25 +370,6 @@ def render_panel(panel_id: str, logo_b64: str):
 
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
-
-    # ── If future just completed, collect result and rerun ────────
-    if future and future.done():
-        result = future.result()
-
-        assistant_count = sum(1 for m in messages if m["role"] == "assistant")
-        messages.append({
-            "role":       "assistant",
-            "content":    result["answer"],
-            "sources":    result["sources"],
-            "message_id": assistant_count,
-            "is_error":   result["is_error"],
-        })
-
-        st.session_state[msg_key]                          = messages
-        st.session_state[f"session_id_{panel_id.lower()}"] = result["session_id"]
-        st.session_state[f"future_{panel_id}"]             = None
-        st.session_state[f"inp_reset_{panel_id}"]         += 1
-        st.rerun()
 
     # ── Render chat bubbles ───────────────────────────────────────
     thinking_html = ""
@@ -454,23 +484,20 @@ def render_panel(panel_id: str, logo_b64: str):
         messages.append({"role": "user", "content": clean_input, "sources": []})
         st.session_state[msg_key] = messages
 
-        # Submit to thread pool — returns immediately, runs in background
+        # Submit to thread — returns immediately, doesn't block
         submit_request(panel_id, clean_input, topic)
 
         st.session_state[f"inp_reset_{panel_id}"] += 1
-
-        # Poll until future is done, rerunning every 0.5s to update UI
-        while True:
-            future = st.session_state.get(f"future_{panel_id}")
-            if future is None or future.done():
-                break
-            time.sleep(0.5)
-            st.rerun()
+        st.rerun()
 
 
 # ── Chat page entry point ─────────────────────────────────────────
 def render_chat_page():
     ensure_async_state()
+
+    # Check futures FIRST — collect results or keep polling
+    # This runs before any widget so both panels stay independent
+    collect_completed_futures()
 
     st.session_state.page = "chat"
 
