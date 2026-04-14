@@ -1,7 +1,6 @@
 import base64
 import json
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -261,55 +260,46 @@ def submit_request(panel_id: str, user_input: str, topic: str):
     )
 
 
-# ── Check and collect completed futures ──────────────────────────
+# ── Collect completed futures (called once at top of page) ────────
 def collect_completed_futures():
     """
-    Called at the TOP of render_chat_page before drawing anything.
-    If any future is done, collect result and rerun to show answer.
-    If any future is still running, sleep briefly and rerun to keep
-    thinking dots animated — without blocking the other panel.
+    Called ONCE at the top of render_chat_page before any widgets.
+    - If a future is done: collect result, save answer, clear future, rerun
+    - If futures are still running: do nothing — page renders normally
+      with thinking state visible. User interaction or the next natural
+      rerun will trigger this again to collect the result.
     """
-    any_pending = False
+    collected = False
 
     for panel_id in ["A", "B"]:
         future = st.session_state.get(f"future_{panel_id}")
         if future is None:
             continue
+        if not future.done():
+            continue
 
-        if future.done():
-            # Collect result
-            result  = future.result()
-            msg_key = f"messages_{panel_id.lower()}"
-            messages = st.session_state.get(msg_key, [])
+        # Future is done — collect result
+        result   = future.result()
+        msg_key  = f"messages_{panel_id.lower()}"
+        messages = st.session_state.get(msg_key, [])
 
-            assistant_count = sum(1 for m in messages if m["role"] == "assistant")
-            messages.append({
-                "role":       "assistant",
-                "content":    result["answer"],
-                "sources":    result["sources"],
-                "message_id": assistant_count,
-                "is_error":   result["is_error"],
-            })
+        assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+        messages.append({
+            "role":       "assistant",
+            "content":    result["answer"],
+            "sources":    result["sources"],
+            "message_id": assistant_count,
+            "is_error":   result["is_error"],
+        })
 
-            st.session_state[msg_key]                           = messages
-            st.session_state[f"session_id_{panel_id.lower()}"]  = result["session_id"]
-            st.session_state[f"future_{panel_id}"]              = None
-            st.session_state[f"inp_reset_{panel_id}"]          += 1
+        st.session_state[msg_key]                           = messages
+        st.session_state[f"session_id_{panel_id.lower()}"]  = result["session_id"]
+        st.session_state[f"future_{panel_id}"]              = None
+        st.session_state[f"inp_reset_{panel_id}"]          += 1
+        collected = True
 
-        else:
-            any_pending = True
-
-    if any_pending:
-        # Sleep briefly then rerun — keeps both panels rendering
-        # and thinking dots animating without blocking either panel
-        time.sleep(0.5)
+    if collected:
         st.rerun()
-
-    elif any(st.session_state.get(f"future_{p}") is None and
-             st.session_state.get(f"inp_reset_{p}", 0) > 0
-             for p in ["A", "B"]):
-        # A future just completed — rerun once to show the answer
-        pass
 
 
 # ── Sources block ─────────────────────────────────────────────────
@@ -484,7 +474,7 @@ def render_panel(panel_id: str, logo_b64: str):
         messages.append({"role": "user", "content": clean_input, "sources": []})
         st.session_state[msg_key] = messages
 
-        # Submit to thread — returns immediately, doesn't block
+        # Submit to thread — returns immediately
         submit_request(panel_id, clean_input, topic)
 
         st.session_state[f"inp_reset_{panel_id}"] += 1
@@ -495,8 +485,7 @@ def render_panel(panel_id: str, logo_b64: str):
 def render_chat_page():
     ensure_async_state()
 
-    # Check futures FIRST — collect results or keep polling
-    # This runs before any widget so both panels stay independent
+    # Collect any completed futures FIRST — no polling, no sleep
     collect_completed_futures()
 
     st.session_state.page = "chat"
