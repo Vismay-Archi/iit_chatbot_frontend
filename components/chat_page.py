@@ -287,46 +287,45 @@ if ENABLE_FEEDBACK:
                 return
 
 
-# ── process_pending: runs FIRST before any widget is drawn ────────
+# ── process_pending ───────────────────────────────────────────────
 def process_pending():
     """
-    3-step flow:
+    4-step flow:
 
-    Step 1 — User clicks Send:
-      -> user msg appended instantly
-      -> pending_{panel} set
-      -> st.rerun()                        <- rerun #1
+    Step 1 — User submits form:
+      -> user msg appended instantly to chat
+      -> pending_{panel} = input text
+      -> st.rerun()                          <- rerun #1
 
     Step 2 — rerun #1:
       -> process_pending() finds pending_{panel}
       -> sets fetching_{panel} = True
-      -> calls backend (this blocks but thinking dots are already visible)
-      -> appends assistant message
-      -> clears pending + fetching
-      -> st.rerun()                        <- rerun #2
+      -> st.rerun()                          <- rerun #2
+         (page renders with thinking dots visible)
 
     Step 3 — rerun #2:
-      -> process_pending() finds nothing
-      -> renders both panels with answer + sources visible
-    """
-    did_work = False
+      -> process_pending() finds fetching_{panel}
+      -> calls backend API (blocks here ~7s)
+      -> appends assistant message
+      -> clears fetching_{panel}
+      -> st.rerun()                          <- rerun #3
 
+    Step 4 — rerun #3:
+      -> process_pending() finds nothing
+      -> renders both panels with answer visible
+    """
+    # Phase B: fetching flag is set — call backend now
     for panel_id in ["A", "B"]:
-        pending = st.session_state.get(f"pending_{panel_id}")
-        if not pending:
+        if not st.session_state.get(f"fetching_{panel_id}"):
             continue
 
-        did_work = True
         msg_key  = f"messages_{panel_id.lower()}"
         topic    = st.session_state.get("topic", "Academic Calendar")
         messages = st.session_state.get(msg_key, [])
+        pending  = st.session_state.get(f"pending_{panel_id}", "")
 
         assistant_count = sum(1 for m in messages if m["role"] == "assistant")
 
-        # Mark as fetching so thinking dots show during this rerun
-        st.session_state[f"fetching_{panel_id}"] = True
-
-        # Call the backend
         answer, sources = get_backend_reply(panel_id, pending, topic)
 
         assistant_msg = {
@@ -352,8 +351,13 @@ def process_pending():
         rk = f"inp_reset_{panel_id}"
         st.session_state[rk] = st.session_state.get(rk, 0) + 1
 
-    if did_work:
-        st.rerun()  # rerun #2 — render fresh with answers visible
+        st.rerun()  # rerun #3
+
+    # Phase A: pending flag is set — set fetching and rerun to show dots
+    for panel_id in ["A", "B"]:
+        if st.session_state.get(f"pending_{panel_id}"):
+            st.session_state[f"fetching_{panel_id}"] = True
+            st.rerun()  # rerun #2 — thinking dots now visible
 
 
 # ── Single panel renderer ─────────────────────────────────────────
@@ -362,7 +366,7 @@ def render_panel(panel_id: str, logo_b64: str):
     topic      = st.session_state.get("topic", "Academic Calendar")
     messages   = st.session_state.get(msg_key, [])
 
-    # Show thinking state if pending OR currently fetching
+    # Show thinking state if pending OR fetching
     is_pending = bool(
         st.session_state.get(f"pending_{panel_id}") or
         st.session_state.get(f"fetching_{panel_id}")
@@ -371,7 +375,6 @@ def render_panel(panel_id: str, logo_b64: str):
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
-    # Animated thinking dots while waiting for backend
     thinking_html = ""
     if is_pending:
         thinking_html = f"""
@@ -454,26 +457,26 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
-    # Input box
+    # ── Input form (st.form prevents page dim on Enter) ───────────
     reset_count = st.session_state.get(f"inp_reset_{panel_id}", 0)
+    form_key    = f"form_{panel_id}_{reset_count}"
     inp_key     = f"inp_{panel_id}_{reset_count}"
 
-    user_input = st.text_input(
-        label="msg",
-        key=inp_key,
-        placeholder="Ask me anything related to IIT...",
-        label_visibility="collapsed",
-        disabled=is_pending,
-    )
-
-    send_col, _ = st.columns([1, 3])
-    with send_col:
-        send_clicked = st.button(
-            "Send >",
-            key=f"send_{panel_id}",
-            use_container_width=True,
+    with st.form(key=form_key, clear_on_submit=True):
+        user_input = st.text_input(
+            label="msg",
+            key=inp_key,
+            placeholder="Ask me anything related to IIT...",
+            label_visibility="collapsed",
             disabled=is_pending,
         )
+        send_col, _ = st.columns([1, 3])
+        with send_col:
+            send_clicked = st.form_submit_button(
+                "Send >",
+                use_container_width=True,
+                disabled=is_pending,
+            )
 
     st.markdown('<p class="inp-hint">Press Enter or click Send</p>', unsafe_allow_html=True)
 
@@ -491,7 +494,7 @@ def render_panel(panel_id: str, logo_b64: str):
         rk = f"inp_reset_{panel_id}"
         st.session_state[rk] = st.session_state.get(rk, 0) + 1
 
-        st.rerun()  # rerun #1 — shows user message + thinking dots
+        st.rerun()  # rerun #1
 
 
 # ── Chat page entry point ─────────────────────────────────────────
