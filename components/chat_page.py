@@ -1,7 +1,6 @@
 import base64
 import json
 import os
-import threading
 from pathlib import Path
 
 import requests
@@ -288,18 +287,42 @@ if ENABLE_FEEDBACK:
                 return
 
 
-# ── Pending-queue processing (parallel threads) ───────────────────
+# ── Step 1: process_pending runs FIRST, before any widget is drawn ─
 def process_pending():
-    def handle_panel(panel_id):
+    """
+    Flow:
+      User clicks Send
+        -> user msg appended to chat
+        -> input stored in pending_{panel}
+        -> st.rerun()                        <- rerun #1
+
+      render_chat_page() starts fresh
+        -> process_pending() runs FIRST
+        -> finds pending_{panel}
+        -> calls backend API
+        -> appends assistant message
+        -> clears pending_{panel}
+        -> st.rerun()                        <- rerun #2
+
+      render_chat_page() starts fresh again
+        -> process_pending() finds nothing
+        -> renders both panels with answer visible
+    """
+    did_work = False
+
+    for panel_id in ["A", "B"]:
         pending = st.session_state.get(f"pending_{panel_id}")
         if not pending:
-            return
+            continue
 
+        did_work = True
         msg_key  = f"messages_{panel_id.lower()}"
         topic    = st.session_state.get("topic", "Academic Calendar")
         messages = st.session_state.get(msg_key, [])
 
         assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+
+        # Call the backend
         answer, sources = get_backend_reply(panel_id, pending, topic)
 
         assistant_msg = {
@@ -318,21 +341,14 @@ def process_pending():
             })
 
         messages.append(assistant_msg)
-        st.session_state[msg_key] = messages
-        st.session_state[f"pending_{panel_id}"] = None
+        st.session_state[msg_key]            = messages
+        st.session_state[f"pending_{panel_id}"] = None  # clear pending
 
         rk = f"inp_reset_{panel_id}"
         st.session_state[rk] = st.session_state.get(rk, 0) + 1
 
-    threads = []
-    for panel_id in ["A", "B"]:
-        if st.session_state.get(f"pending_{panel_id}"):
-            t = threading.Thread(target=handle_panel, args=(panel_id,))
-            threads.append(t)
-            t.start()
-
-    for t in threads:
-        t.join()
+    if did_work:
+        st.rerun()  # rerun #2 — render fresh with answers visible
 
 
 # ── Single panel renderer ─────────────────────────────────────────
@@ -345,6 +361,7 @@ def render_panel(panel_id: str, logo_b64: str):
     ensure_message_ids(messages)
     st.session_state[msg_key] = messages
 
+    # Animated thinking dots while waiting
     thinking_html = ""
     if is_pending:
         thinking_html = f"""
@@ -371,6 +388,7 @@ def render_panel(panel_id: str, logo_b64: str):
 </div>
 """, unsafe_allow_html=True)
 
+    # Sources for latest assistant message
     latest_assistant = None
     latest_idx       = None
     for idx in range(len(messages) - 1, -1, -1):
@@ -426,6 +444,7 @@ def render_panel(panel_id: str, logo_b64: str):
                 st.success("Feedback saved.")
                 st.rerun()
 
+    # Input box
     reset_count = st.session_state.get(f"inp_reset_{panel_id}", 0)
     inp_key     = f"inp_{panel_id}_{reset_count}"
 
@@ -451,19 +470,23 @@ def render_panel(panel_id: str, logo_b64: str):
     if send_clicked and user_input.strip() and not is_pending:
         clean_input = user_input.strip()
 
+        # Append user message immediately so it shows right away (rerun #1)
         msg_list = st.session_state.get(msg_key, [])
         msg_list.append({"role": "user", "content": clean_input, "sources": []})
         st.session_state[msg_key] = msg_list
 
+        # Store pending input — process_pending() picks this up on rerun #1
         st.session_state[f"pending_{panel_id}"] = clean_input
 
         rk = f"inp_reset_{panel_id}"
         st.session_state[rk] = st.session_state.get(rk, 0) + 1
-        st.rerun()
+
+        st.rerun()  # rerun #1
 
 
-# ── Chat page ─────────────────────────────────────────────────────
+# ── Chat page entry point ─────────────────────────────────────────
 def render_chat_page():
+    # FIRST: drain any pending API calls before drawing any widget
     process_pending()
 
     st.session_state.page = "chat"
